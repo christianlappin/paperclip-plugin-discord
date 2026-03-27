@@ -12,6 +12,7 @@ import {
   postEmbedWithId,
   getApplicationId,
   registerSlashCommands,
+  respondToInteraction,
   type DiscordEmbed,
   type DiscordComponent,
 } from "./discord-api.js";
@@ -39,6 +40,10 @@ import { DiscordAdapter } from "./adapter.js";
 import { processMediaMessage, type MediaAttachment } from "./media-pipeline.js";
 import { registerCommand, parseCommandMessage, executeCommand, listCommands } from "./custom-commands.js";
 import { registerWatch, checkWatches } from "./proactive-suggestions.js";
+
+// Module-level state captured during setup() so onWebhook() can reuse it.
+let _pluginCtx: PluginContext | null = null;
+let _cmdCtx: CommandContext | null = null;
 
 type DiscordConfig = {
   discordBotTokenRef: string;
@@ -130,13 +135,32 @@ const plugin = definePlugin({
     const token = await ctx.secrets.resolve(config.discordBotTokenRef);
     const baseUrl = config.paperclipBaseUrl || "http://localhost:3100";
     const retentionDays = config.intelligenceRetentionDays || 30;
-    const companyId = "default";
+
+    // Resolve actual company ID from the Paperclip API instead of hardcoding "default".
+    let companyId: string;
+    try {
+      const companies = await ctx.companies.list({ limit: 1 });
+      if (companies.length > 0) {
+        companyId = companies[0].id;
+      } else {
+        ctx.logger.warn("No companies found via ctx.companies.list(), commands requiring companyId will fail");
+        companyId = "default";
+      }
+    } catch (err) {
+      ctx.logger.warn("Failed to resolve company ID, falling back to 'default'", { error: String(err) });
+      companyId = "default";
+    }
+
     const cmdCtx: CommandContext = {
       baseUrl,
       companyId,
       token,
       defaultChannelId: config.defaultChannelId,
     };
+
+    // Store context at module level so onWebhook() can reuse it.
+    _pluginCtx = ctx;
+    _cmdCtx = cmdCtx;
 
     // --- Register slash commands with Discord ---
     if (config.defaultGuildId) {
@@ -1037,11 +1061,32 @@ const plugin = definePlugin({
     if (input.endpointKey === WEBHOOK_KEYS.discordInteractions) {
       const body = input.parsedBody as Record<string, unknown>;
       if (!body) return;
-      await handleInteraction(
-        input as unknown as PluginContext,
-        body as any,
-        { baseUrl: "http://localhost:3100", companyId: "default", token: "", defaultChannelId: "" },
-      );
+
+      const ctx = _pluginCtx;
+      const cmdCtx = _cmdCtx;
+
+      if (!ctx || !cmdCtx) {
+        // Return a valid Discord interaction response even before setup completes.
+        // The host framework forwards the return value as the HTTP response body.
+        return respondToInteraction({
+          type: 4,
+          content: "Plugin is still starting up. Please try again in a moment.",
+          ephemeral: true,
+        }) as unknown as void;
+      }
+
+      try {
+        const response = await handleInteraction(ctx, body as any, cmdCtx);
+        // The host framework forwards this as the HTTP response body to Discord.
+        return response as unknown as void;
+      } catch (err) {
+        ctx.logger.error("Interaction handler failed", { error: String(err) });
+        return respondToInteraction({
+          type: 4,
+          content: "An error occurred while processing this command. Please try again.",
+          ephemeral: true,
+        }) as unknown as void;
+      }
     }
   },
 
