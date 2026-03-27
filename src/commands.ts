@@ -3,6 +3,15 @@ import { type DiscordEmbed, respondToInteraction } from "./discord-api.js";
 import { COLORS, METRIC_NAMES } from "./constants.js";
 import { withRetry } from "./retry.js";
 import { handleHandoffButton, handleDiscussionButton, handleAcpCommand } from "./session-registry.js";
+import {
+  type Workflow,
+  type WorkflowStep,
+  getWorkflowStore,
+  saveWorkflowStore,
+  runWorkflow,
+  resumeWorkflowAfterApproval,
+  BUILTIN_COMMANDS,
+} from "./workflow-engine.js";
 
 interface InteractionOption {
   name: string;
@@ -149,6 +158,63 @@ export const SLASH_COMMANDS = [
               { name: "daily", value: "daily" },
               { name: "bidaily", value: "bidaily" },
               { name: "tridaily", value: "tridaily" },
+            ],
+          },
+        ],
+      },
+      {
+        name: "commands",
+        description: "Manage workflow-based custom commands",
+        type: 2,
+        options: [
+          {
+            name: "import",
+            description: "Import a workflow command from JSON",
+            type: 1,
+            options: [
+              {
+                name: "json",
+                description: "Inline JSON workflow definition",
+                type: 3,
+                required: false,
+              },
+            ],
+          },
+          {
+            name: "list",
+            description: "List all registered workflow commands",
+            type: 1,
+          },
+          {
+            name: "run",
+            description: "Execute a workflow command by name",
+            type: 1,
+            options: [
+              {
+                name: "name",
+                description: "Workflow command name",
+                type: 3,
+                required: true,
+              },
+              {
+                name: "args",
+                description: "Arguments to pass to the workflow",
+                type: 3,
+                required: false,
+              },
+            ],
+          },
+          {
+            name: "delete",
+            description: "Delete a workflow command",
+            type: 1,
+            options: [
+              {
+                name: "name",
+                description: "Workflow command name to delete",
+                type: 3,
+                required: true,
+              },
             ],
           },
         ],
@@ -303,6 +369,8 @@ async function handleSlashCommand(
         getOption(subcommand.options ?? [], "action") ?? "status",
         getOption(subcommand.options ?? [], "mode"),
       );
+    case "commands":
+      return handleCommands(ctx, subcommand, cmdCtx);
     default:
       return respondToInteraction({
         type: 4,
@@ -564,6 +632,10 @@ function handleHelp(): unknown {
     "`/clip connect [company]` — Link channel to a company",
     "`/clip connect-channel <project>` — Map channel to a project",
     "`/clip digest <on|off|status> [mode]` — Configure daily digest",
+    "`/clip commands import [json]` — Import a workflow command",
+    "`/clip commands list` — List workflow commands",
+    "`/clip commands run <name> [args]` — Run a workflow command",
+    "`/clip commands delete <name>` — Delete a workflow command",
     "`/clip help` — Show this help message",
     "",
     "`/acp spawn <agent> <task>` — Start an agent session in a thread",
@@ -855,6 +927,10 @@ async function handleButtonClick(
     return handleDiscussionButton(ctx, token, customId, actor);
   }
 
+  if (customId.startsWith("wf_approve_") || customId.startsWith("wf_reject_")) {
+    return handleWorkflowApprovalButton(ctx, customId, actor, cmdCtx);
+  }
+
   return respondToInteraction({
     type: 4,
     content: "Unknown button action.",
@@ -996,4 +1072,329 @@ async function handleEscalationButton(
     default:
       return respondToInteraction({ type: 4, content: `Unknown escalation action: ${action}`, ephemeral: true });
   }
+}
+
+// ---------------------------------------------------------------------------
+// /clip commands subcommands
+// ---------------------------------------------------------------------------
+
+async function handleCommands(
+  ctx: PluginContext,
+  subcommandGroup: InteractionOption,
+  cmdCtx?: CommandContext,
+): Promise<unknown> {
+  const sub = subcommandGroup.options?.[0];
+  if (!sub) {
+    return respondToInteraction({
+      type: 4,
+      content: "Missing subcommand. Try `/clip commands list`.",
+      ephemeral: true,
+    });
+  }
+
+  const companyId = cmdCtx?.companyId ?? "default";
+  const baseUrl = cmdCtx?.baseUrl ?? "http://localhost:3100";
+  const token = cmdCtx?.token ?? "";
+  const channelId = cmdCtx?.defaultChannelId ?? "";
+
+  switch (sub.name) {
+    case "import":
+      return handleCommandsImport(ctx, companyId, getOption(sub.options ?? [], "json"));
+    case "list":
+      return handleCommandsList(ctx, companyId);
+    case "run":
+      return handleCommandsRun(
+        ctx,
+        companyId,
+        baseUrl,
+        token,
+        channelId,
+        getOption(sub.options ?? [], "name") ?? "",
+        getOption(sub.options ?? [], "args") ?? "",
+      );
+    case "delete":
+      return handleCommandsDelete(ctx, companyId, getOption(sub.options ?? [], "name") ?? "");
+    default:
+      return respondToInteraction({
+        type: 4,
+        content: `Unknown commands subcommand: ${sub.name}`,
+        ephemeral: true,
+      });
+  }
+}
+
+async function handleCommandsImport(
+  ctx: PluginContext,
+  companyId: string,
+  jsonStr?: string,
+): Promise<unknown> {
+  if (!jsonStr?.trim()) {
+    return respondToInteraction({
+      type: 4,
+      content: "Provide a JSON workflow via the `json` option.\n\nExample:\n```json\n{\"name\":\"greet\",\"steps\":[{\"type\":\"send_message\",\"message\":\"Hello {{args}}!\"}]}\n```",
+      ephemeral: true,
+    });
+  }
+
+  let parsed: { name?: string; description?: string; steps?: WorkflowStep[] };
+  try {
+    parsed = JSON.parse(jsonStr.trim());
+  } catch {
+    return respondToInteraction({
+      type: 4,
+      content: "Invalid JSON. Please provide a valid workflow definition.",
+      ephemeral: true,
+    });
+  }
+
+  if (!parsed.name || typeof parsed.name !== "string") {
+    return respondToInteraction({
+      type: 4,
+      content: "Workflow must have a `name` field.",
+      ephemeral: true,
+    });
+  }
+
+  if (!Array.isArray(parsed.steps) || parsed.steps.length === 0) {
+    return respondToInteraction({
+      type: 4,
+      content: "Workflow must have at least one step in the `steps` array.",
+      ephemeral: true,
+    });
+  }
+
+  const name = parsed.name.toLowerCase().trim();
+
+  if (BUILTIN_COMMANDS.has(name)) {
+    return respondToInteraction({
+      type: 4,
+      content: `Cannot override built-in command: \`${name}\``,
+      ephemeral: true,
+    });
+  }
+
+  const store = await getWorkflowStore(ctx, companyId);
+  const workflow: Workflow = {
+    name,
+    description: parsed.description,
+    steps: parsed.steps,
+    createdAt: new Date().toISOString(),
+  };
+  store.workflows[name] = workflow;
+  await saveWorkflowStore(ctx, companyId, store);
+
+  ctx.logger.info("Workflow command imported", { name, steps: workflow.steps.length });
+
+  return respondToInteraction({
+    type: 4,
+    embeds: [{
+      title: "Workflow Imported",
+      description: `**${name}** — ${workflow.steps.length} step(s)`,
+      color: COLORS.GREEN,
+      fields: workflow.description ? [{ name: "Description", value: workflow.description }] : [],
+      footer: { text: "Paperclip Workflow Commands" },
+      timestamp: new Date().toISOString(),
+    }],
+  });
+}
+
+async function handleCommandsList(
+  ctx: PluginContext,
+  companyId: string,
+): Promise<unknown> {
+  const store = await getWorkflowStore(ctx, companyId);
+  const names = Object.keys(store.workflows);
+
+  if (names.length === 0) {
+    return respondToInteraction({
+      type: 4,
+      content: "No workflow commands registered. Use `/clip commands import` to add one.",
+      ephemeral: true,
+    });
+  }
+
+  const lines = names.map((n) => {
+    const wf = store.workflows[n]!;
+    const date = wf.createdAt ? new Date(wf.createdAt).toLocaleDateString() : "unknown";
+    return `- **${n}** — ${wf.steps.length} step(s), created ${date}${wf.description ? ` — ${wf.description}` : ""}`;
+  });
+
+  return respondToInteraction({
+    type: 4,
+    embeds: [{
+      title: "Workflow Commands",
+      description: lines.join("\n"),
+      color: COLORS.BLUE,
+      footer: { text: "Paperclip Workflow Commands" },
+      timestamp: new Date().toISOString(),
+    }],
+    ephemeral: true,
+  });
+}
+
+async function handleCommandsRun(
+  ctx: PluginContext,
+  companyId: string,
+  baseUrl: string,
+  token: string,
+  channelId: string,
+  name: string,
+  args: string,
+): Promise<unknown> {
+  if (!name.trim()) {
+    return respondToInteraction({
+      type: 4,
+      content: "Usage: `/clip commands run name:<command-name> [args:<arguments>]`",
+      ephemeral: true,
+    });
+  }
+
+  const normalized = name.toLowerCase().trim();
+  const store = await getWorkflowStore(ctx, companyId);
+  const workflow = store.workflows[normalized];
+
+  if (!workflow) {
+    return respondToInteraction({
+      type: 4,
+      content: `Workflow command not found: \`${normalized}\``,
+      ephemeral: true,
+    });
+  }
+
+  // Acknowledge immediately, then run workflow
+  const result = await runWorkflow({
+    ctx,
+    token,
+    channelId,
+    companyId,
+    baseUrl,
+    workflow,
+    args,
+  });
+
+  if (result.suspended) {
+    return respondToInteraction({
+      type: 4,
+      embeds: [{
+        title: `Workflow: ${normalized}`,
+        description: `Completed ${result.stepsCompleted} step(s), waiting for approval...`,
+        color: COLORS.YELLOW,
+        footer: { text: "Paperclip Workflow Commands" },
+        timestamp: new Date().toISOString(),
+      }],
+    });
+  }
+
+  if (!result.ok) {
+    return respondToInteraction({
+      type: 4,
+      embeds: [{
+        title: `Workflow Failed: ${normalized}`,
+        description: `Failed at step ${result.stepsCompleted + 1}: ${result.error ?? "Unknown error"}`,
+        color: COLORS.RED,
+        footer: { text: "Paperclip Workflow Commands" },
+        timestamp: new Date().toISOString(),
+      }],
+    });
+  }
+
+  await ctx.metrics.write(METRIC_NAMES.workflowsExecuted, 1);
+
+  return respondToInteraction({
+    type: 4,
+    embeds: [{
+      title: `Workflow Complete: ${normalized}`,
+      description: `All ${result.stepsCompleted} step(s) executed successfully.`,
+      color: COLORS.GREEN,
+      footer: { text: "Paperclip Workflow Commands" },
+      timestamp: new Date().toISOString(),
+    }],
+  });
+}
+
+async function handleCommandsDelete(
+  ctx: PluginContext,
+  companyId: string,
+  name: string,
+): Promise<unknown> {
+  if (!name.trim()) {
+    return respondToInteraction({
+      type: 4,
+      content: "Usage: `/clip commands delete name:<command-name>`",
+      ephemeral: true,
+    });
+  }
+
+  const normalized = name.toLowerCase().trim();
+  const store = await getWorkflowStore(ctx, companyId);
+
+  if (!store.workflows[normalized]) {
+    return respondToInteraction({
+      type: 4,
+      content: `Workflow command not found: \`${normalized}\``,
+      ephemeral: true,
+    });
+  }
+
+  delete store.workflows[normalized];
+  await saveWorkflowStore(ctx, companyId, store);
+
+  ctx.logger.info("Workflow command deleted", { name: normalized });
+
+  return respondToInteraction({
+    type: 4,
+    embeds: [{
+      title: "Workflow Deleted",
+      description: `Removed workflow command: **${normalized}**`,
+      color: COLORS.GRAY,
+      footer: { text: "Paperclip Workflow Commands" },
+      timestamp: new Date().toISOString(),
+    }],
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Workflow approval button handler
+// ---------------------------------------------------------------------------
+
+async function handleWorkflowApprovalButton(
+  ctx: PluginContext,
+  customId: string,
+  actor: string,
+  cmdCtx?: CommandContext,
+): Promise<unknown> {
+  const approved = customId.startsWith("wf_approve_");
+  const approvalId = customId.replace(/^wf_(approve|reject)_/, "");
+  const companyId = cmdCtx?.companyId ?? "default";
+  const baseUrl = cmdCtx?.baseUrl ?? "http://localhost:3100";
+  const token = cmdCtx?.token ?? "";
+  const channelId = cmdCtx?.defaultChannelId ?? "";
+
+  ctx.logger.info("Workflow approval button clicked", { approvalId, approved, actor });
+
+  const result = await resumeWorkflowAfterApproval(
+    ctx,
+    token,
+    channelId,
+    companyId,
+    baseUrl,
+    approvalId,
+    approved,
+  );
+
+  const statusText = approved ? "Approved" : "Rejected";
+  const color = approved ? COLORS.GREEN : COLORS.RED;
+
+  const embeds: DiscordEmbed[] = [{
+    title: `Workflow ${statusText}`,
+    description: `**${statusText}** by ${actor}${!approved ? " — workflow stopped." : result.ok ? " — workflow resumed." : ` — resume failed: ${result.error}`}`,
+    color,
+    footer: { text: `Approval: ${approvalId}` },
+    timestamp: new Date().toISOString(),
+  }];
+
+  return {
+    type: 7,
+    data: { embeds, components: [] },
+  };
 }

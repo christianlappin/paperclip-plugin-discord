@@ -72,6 +72,7 @@ export const METRIC_NAMES = {
   watchesTriggered: "discord_watches_triggered",
   inboundRouted: "discord_inbound_routed",
   digestSent: "discord_digest_sent",
+  workflowsExecuted: "discord_workflows_executed",
 } as const;
 
 export const ROLE_WEIGHTS: Record<string, number> = {
