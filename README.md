@@ -46,6 +46,16 @@ This is that plugin.
 - `/clip status` - Show active agents and recent completions
 - `/clip approve <id>` - Approve a pending approval
 - `/clip budget <agent>` - Check an agent's remaining budget
+- `/clip issues [project]` - List open issues with optional project filter
+- `/clip agents` - Show all agents with status indicators
+- `/clip help` - Display all available commands
+- `/clip connect [company]` - Link a Discord channel to a Paperclip company
+- `/clip connect-channel <project>` - Map a Discord channel to a project for notification routing
+- `/clip digest <on|off|status> [mode]` - Configure daily digest (daily/bidaily/tridaily)
+- `/clip commands import <json>` - Import a workflow command from JSON
+- `/clip commands list` - List registered workflow commands
+- `/clip commands run <name> [args]` - Execute a workflow command
+- `/clip commands delete <name>` - Delete a workflow command
 - `/acp spawn agent:<name> task:<description>` - Start a new agent session in a Discord thread
 - `/acp status session:<id>` - Check ACP session status
 - `/acp cancel session:<id>` - Cancel a running ACP session
@@ -91,6 +101,28 @@ This is that plugin.
 - Content-type and file-extension detection
 - Configure which channels to monitor via `mediaChannelIds`
 - Enable with `enableMediaPipeline: true`
+
+### Reply routing
+- Reply to any bot notification to route your message back to Paperclip
+- Replies to issue notifications create issue comments automatically
+- Replies to escalation notifications resolve the escalation as a human reply
+- Message mappings stored per-channel/message for accurate routing
+- Enable/disable with `enableInbound` config toggle (default: true)
+
+### Daily digest
+- Configurable digest summaries posted to your Discord channels
+- Modes: `daily` (once), `bidaily` (twice), `tridaily` (three times per day)
+- Configure via `/clip digest on <mode>` or the `digestMode` config setting
+- Includes: tasks completed/created today, active agents, in-progress/review/blocked issues
+- Per-company routing to mapped channels
+
+### Workflow commands
+- Define multi-step workflows as JSON and execute them via `/clip commands run`
+- Seven step types: `fetch_issue`, `invoke_agent`, `http_request`, `send_message`, `create_issue`, `wait_approval`, `set_state`
+- Template interpolation: `{{arg0}}`, `{{args}}`, `{{prev.result}}`, `{{step_id.result}}`
+- `wait_approval` steps suspend execution and show Approve/Reject buttons
+- Import workflows with `/clip commands import`, list with `/clip commands list`
+- Built-in command names are protected and cannot be overridden
 
 ### Phase 4: Custom Workflow Commands
 - Agents register `!command` style commands via the `register_custom_command` tool
@@ -164,6 +196,13 @@ curl -X POST http://127.0.0.1:3100/api/plugins/install \
 | `backfillDays` | No | Days of history to scan on first install (default: 90, max: 365) |
 | `intelligenceRetentionDays` | No | Days to retain intelligence signals (default: 30, max: 365) |
 | `maxAgentsPerThread` | No | Max concurrent agents per Discord thread (default: 5, max: 10) |
+| `enableCommands` | No | Enable slash command handling (default: true) |
+| `enableInbound` | No | Enable reply routing to Paperclip (default: true) |
+| `topicRouting` | No | Route notifications by project-to-channel mappings (default: false) |
+| `digestMode` | No | Digest frequency: off, daily, bidaily, tridaily (default: off) |
+| `dailyDigestTime` | No | UTC time for daily digest, HH:MM (default: 09:00) |
+| `bidailySecondTime` | No | Second digest time for bidaily mode (default: 17:00) |
+| `tridailyTimes` | No | Comma-separated HH:MM times for tridaily (default: 07:00,13:00,19:00) |
 | `enableMediaPipeline` | No | Detect and process media attachments (default: false) |
 | `mediaChannelIds` | No | Channel IDs to monitor for media (empty = all) |
 | `enableCustomCommands` | No | Allow agents to register !commands (default: false) |
@@ -190,6 +229,22 @@ curl -X POST http://127.0.0.1:3100/api/plugins/install \
 
 Notification event handler patterns adapted from PR [#398](https://github.com/paperclipai/paperclip/pull/398) by [@StartupBros](https://github.com/StartupBros).
 
+## Changelog
+
+### v0.3.0 — Telegram Feature Parity
+
+Brings the Discord plugin to full parity with the Telegram plugin across 14 feature gaps.
+
+**New slash commands:** `/clip issues`, `/clip agents`, `/clip help`, `/clip connect`, `/clip connect-channel`, `/clip digest`, `/clip commands import/list/run/delete`
+
+**Reply routing:** Replying to bot notifications now routes messages back to Paperclip as issue comments or escalation responses. Controlled by the `enableInbound` toggle.
+
+**Daily digest:** Configurable summary digests (daily/bidaily/tridaily) with tasks completed, active agents, and blocked issues. Configure via `/clip digest on <mode>` or the `digestMode` config.
+
+**Workflow engine:** Define multi-step workflows with 7 step types (`fetch_issue`, `invoke_agent`, `http_request`, `send_message`, `create_issue`, `wait_approval`, `set_state`). Supports template interpolation and approval-gated execution.
+
+**Config toggles:** `enableCommands`, `enableInbound`, `topicRouting`, digest scheduling options.
+
 ## Migration
 
 ### v0.2.1
@@ -213,7 +268,7 @@ pnpm test
 pnpm build
 ```
 
-147 unit tests covering formatters, commands, intelligence, session registry, media pipeline, custom commands, proactive suggestions, and retry logic.
+238 unit tests covering formatters, commands, intelligence, session registry, media pipeline, custom commands, proactive suggestions, retry logic, workflow engine, and Telegram-parity features.
 
 ## License
 
