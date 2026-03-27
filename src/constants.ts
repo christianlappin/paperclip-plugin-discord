@@ -34,6 +34,13 @@ export const DEFAULT_CONFIG = {
   enableCustomCommands: false,
   enableProactiveSuggestions: false,
   proactiveScanIntervalMinutes: 15,
+  enableCommands: true,
+  enableInbound: true,
+  topicRouting: false,
+  digestMode: "off" as string,
+  dailyDigestTime: "09:00",
+  bidailySecondTime: "17:00",
+  tridailyTimes: "07:00,13:00,19:00",
 } as const;
 
 export const DISCORD_API_BASE = "https://discord.com/api/v10";
@@ -63,6 +70,8 @@ export const METRIC_NAMES = {
   mediaProcessed: "discord_media_processed",
   customCommandsExecuted: "discord_custom_commands_executed",
   watchesTriggered: "discord_watches_triggered",
+  inboundRouted: "discord_inbound_routed",
+  digestSent: "discord_digest_sent",
 } as const;
 
 export const ROLE_WEIGHTS: Record<string, number> = {

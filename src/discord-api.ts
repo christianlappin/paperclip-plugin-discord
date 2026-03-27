@@ -108,6 +108,57 @@ export async function postEmbed(
   }
 }
 
+export async function postEmbedWithId(
+  ctx: PluginContext,
+  token: string,
+  channelId: string,
+  message: DiscordMessage,
+): Promise<string | null> {
+  try {
+    let messageId: string | null = null;
+    await withRetry(async () => {
+      const response = await discordFetch(
+        ctx,
+        token,
+        `/channels/${channelId}/messages`,
+        {
+          method: "POST",
+          body: {
+            content: message.content,
+            embeds: message.embeds,
+            components: message.components,
+          },
+        },
+      );
+
+      if (!response.ok) {
+        const text = await response.text();
+        const err = new Error(`Discord API error: ${response.status}`);
+        (err as any).status = response.status;
+        (err as any).headers = response.headers;
+        ctx.logger.warn("Discord API error", {
+          status: response.status,
+          body: text,
+          channelId,
+        });
+        throw err;
+      }
+
+      const data = (await response.json()) as { id: string };
+      messageId = data.id;
+    });
+
+    await ctx.metrics.write(METRIC_NAMES.sent, 1);
+    return messageId;
+  } catch (error) {
+    ctx.logger.error("Discord notification delivery failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    await ctx.metrics.write(METRIC_NAMES.failed, 1);
+    return null;
+  }
+}
+
 export async function registerSlashCommands(
   ctx: PluginContext,
   token: string,

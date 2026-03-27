@@ -207,6 +207,49 @@ const manifest: PaperclipPluginManifestV1 = {
         minimum: 5,
         maximum: 60,
       },
+      enableCommands: {
+        type: "boolean",
+        title: "Enable slash commands",
+        description: "Allow Discord users to invoke /clip and /acp slash commands.",
+        default: DEFAULT_CONFIG.enableCommands,
+      },
+      enableInbound: {
+        type: "boolean",
+        title: "Enable inbound reply routing",
+        description:
+          "Route Discord replies to bot notifications back to Paperclip as issue comments or escalation responses.",
+        default: DEFAULT_CONFIG.enableInbound,
+      },
+      topicRouting: {
+        type: "boolean",
+        title: "Enable topic/channel routing",
+        description:
+          "Route notifications to specific Discord channels based on project-to-channel mappings set via /clip connect-channel.",
+        default: DEFAULT_CONFIG.topicRouting,
+      },
+      digestMode: {
+        type: "string",
+        enum: ["off", "daily", "bidaily", "tridaily"],
+        title: "Digest mode",
+        description: "How often to send a summary digest to mapped channels.",
+        default: DEFAULT_CONFIG.digestMode,
+      },
+      dailyDigestTime: {
+        type: "string",
+        title: "Daily digest time (HH:MM UTC)",
+        description: "Time to send the daily digest in UTC.",
+        default: DEFAULT_CONFIG.dailyDigestTime,
+      },
+      bidailySecondTime: {
+        type: "string",
+        title: "Second digest time for bidaily mode (HH:MM UTC)",
+        default: DEFAULT_CONFIG.bidailySecondTime,
+      },
+      tridailyTimes: {
+        type: "string",
+        title: "Digest times for tridaily mode (comma-separated HH:MM UTC)",
+        default: DEFAULT_CONFIG.tridailyTimes,
+      },
     },
     required: ["discordBotTokenRef", "defaultChannelId"],
   },
@@ -231,6 +274,13 @@ const manifest: PaperclipPluginManifestV1 = {
       description:
         "Periodically evaluate registered watch conditions and post proactive suggestions.",
       schedule: "*/15 * * * *",
+    },
+    {
+      jobKey: "discord-daily-digest",
+      displayName: "Discord Daily Digest",
+      description:
+        "Hourly job that checks if the current UTC hour matches configured digest times and sends a summary.",
+      schedule: "0 * * * *",
     },
   ],
   tools: [

@@ -29,7 +29,20 @@ interface InteractionCreateEvent {
   channel_id?: string;
 }
 
+export interface MessageCreateEvent {
+  id: string;
+  channel_id: string;
+  content: string;
+  author: { id: string; username: string; bot?: boolean };
+  message_reference?: {
+    message_id: string;
+    channel_id: string;
+    guild_id?: string;
+  };
+}
+
 type InteractionHandler = (interaction: InteractionCreateEvent) => Promise<unknown>;
+type MessageHandler = (message: MessageCreateEvent) => Promise<void>;
 
 export async function respondViaCallback(
   ctx: PluginContext,
@@ -62,6 +75,7 @@ export async function connectGateway(
   ctx: PluginContext,
   token: string,
   onInteraction: InteractionHandler,
+  onMessage?: MessageHandler,
 ): Promise<{ close: () => void }> {
   const gatewayUrl = await getGatewayUrl(ctx, token);
   if (!gatewayUrl) {
@@ -121,7 +135,7 @@ export async function connectGateway(
               op: 2,
               d: {
                 token: `Bot ${token}`,
-                intents: 1,
+                intents: 1 | 512 | 32768, // GUILDS | GUILD_MESSAGES | MESSAGE_CONTENT
                 properties: {
                   os: "linux",
                   browser: "paperclip-plugin-discord",
@@ -154,6 +168,17 @@ export async function connectGateway(
               await respondViaCallback(ctx, interaction.id, interaction.token, response);
             } catch (error) {
               ctx.logger.error("Gateway interaction handler error", {
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }
+          }
+
+          if (payload.t === "MESSAGE_CREATE" && onMessage) {
+            const message = payload.d as MessageCreateEvent;
+            try {
+              await onMessage(message);
+            } catch (error) {
+              ctx.logger.error("Gateway message handler error", {
                 error: error instanceof Error ? error.message : String(error),
               });
             }
