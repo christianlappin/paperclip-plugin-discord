@@ -138,71 +138,80 @@ function sessionsKey(threadId: string): string {
 export async function getThreadSessions(
   ctx: PluginContext,
   threadId: string,
+  companyId?: string,
 ): Promise<AgentSessionEntry[]> {
-  const raw = await ctx.state.get({
-    scopeKind: "company",
-    scopeId: "default",
-    stateKey: sessionsKey(threadId),
-  });
-  if (!raw) return [];
-  return (raw as ThreadSessions).sessions ?? [];
+  const key = sessionsKey(threadId);
+  if (companyId) {
+    const raw = await ctx.state.get({ scopeKind: "company", scopeId: companyId, stateKey: key });
+    if (raw) return (raw as ThreadSessions).sessions ?? [];
+  }
+  // Backward-compat fallback: read from "default" scope
+  const fallback = await ctx.state.get({ scopeKind: "company", scopeId: "default", stateKey: key });
+  if (!fallback) return [];
+  return (fallback as ThreadSessions).sessions ?? [];
 }
 
 async function saveThreadSessions(
   ctx: PluginContext,
   threadId: string,
   sessions: AgentSessionEntry[],
+  companyId: string = "default",
 ): Promise<void> {
   await ctx.state.set(
-    { scopeKind: "company", scopeId: "default", stateKey: sessionsKey(threadId) },
+    { scopeKind: "company", scopeId: companyId, stateKey: sessionsKey(threadId) },
     { sessions } as ThreadSessions,
   );
 }
 
-async function getHandoff(ctx: PluginContext, handoffId: string): Promise<HandoffRecord | null> {
-  const raw = await ctx.state.get({
-    scopeKind: "company",
-    scopeId: "default",
-    stateKey: `handoff_${handoffId}`,
-  });
-  return (raw as HandoffRecord) ?? null;
+async function getHandoff(ctx: PluginContext, handoffId: string, companyId?: string): Promise<HandoffRecord | null> {
+  const key = `handoff_${handoffId}`;
+  if (companyId) {
+    const raw = await ctx.state.get({ scopeKind: "company", scopeId: companyId, stateKey: key });
+    if (raw) return raw as HandoffRecord;
+  }
+  const fallback = await ctx.state.get({ scopeKind: "company", scopeId: "default", stateKey: key });
+  return (fallback as HandoffRecord) ?? null;
 }
 
 async function saveHandoff(ctx: PluginContext, record: HandoffRecord): Promise<void> {
+  const scopeId = record.companyId || "default";
   await ctx.state.set(
-    { scopeKind: "company", scopeId: "default", stateKey: `handoff_${record.handoffId}` },
+    { scopeKind: "company", scopeId, stateKey: `handoff_${record.handoffId}` },
     record,
   );
 }
 
-async function getDiscussion(ctx: PluginContext, id: string): Promise<DiscussionLoop | null> {
-  const raw = await ctx.state.get({
-    scopeKind: "company",
-    scopeId: "default",
-    stateKey: `discussion_${id}`,
-  });
-  return (raw as DiscussionLoop) ?? null;
+async function getDiscussion(ctx: PluginContext, id: string, companyId?: string): Promise<DiscussionLoop | null> {
+  const key = `discussion_${id}`;
+  if (companyId) {
+    const raw = await ctx.state.get({ scopeKind: "company", scopeId: companyId, stateKey: key });
+    if (raw) return raw as DiscussionLoop;
+  }
+  const fallback = await ctx.state.get({ scopeKind: "company", scopeId: "default", stateKey: key });
+  return (fallback as DiscussionLoop) ?? null;
 }
 
 async function saveDiscussion(ctx: PluginContext, record: DiscussionLoop): Promise<void> {
+  const scopeId = record.companyId || "default";
   await ctx.state.set(
-    { scopeKind: "company", scopeId: "default", stateKey: `discussion_${record.discussionId}` },
+    { scopeKind: "company", scopeId, stateKey: `discussion_${record.discussionId}` },
     record,
   );
 }
 
-async function findActiveDiscussion(ctx: PluginContext, threadId: string): Promise<string | null> {
-  const raw = await ctx.state.get({
-    scopeKind: "company",
-    scopeId: "default",
-    stateKey: `active_discussion_${threadId}`,
-  });
-  return (raw as string) ?? null;
+async function findActiveDiscussion(ctx: PluginContext, threadId: string, companyId?: string): Promise<string | null> {
+  const key = `active_discussion_${threadId}`;
+  if (companyId) {
+    const raw = await ctx.state.get({ scopeKind: "company", scopeId: companyId, stateKey: key });
+    if (raw) return raw as string;
+  }
+  const fallback = await ctx.state.get({ scopeKind: "company", scopeId: "default", stateKey: key });
+  return (fallback as string) ?? null;
 }
 
-async function clearActiveDiscussion(ctx: PluginContext, threadId: string): Promise<void> {
+async function clearActiveDiscussion(ctx: PluginContext, threadId: string, companyId: string = "default"): Promise<void> {
   await ctx.state.set(
-    { scopeKind: "company", scopeId: "default", stateKey: `active_discussion_${threadId}` },
+    { scopeKind: "company", scopeId: companyId, stateKey: `active_discussion_${threadId}` },
     null,
   );
 }
@@ -241,7 +250,7 @@ export async function spawnAgentInThread(
   taskPrompt: string,
   maxAgents: number = MAX_AGENTS_PER_THREAD,
 ): Promise<{ ok: boolean; sessionId?: string; transport?: TransportKind; error?: string }> {
-  const sessions = await getThreadSessions(ctx, threadId);
+  const sessions = await getThreadSessions(ctx, threadId, companyId);
   const running = sessions.filter((s) => s.status === "running");
 
   if (running.length >= maxAgents) {
@@ -325,7 +334,7 @@ export async function spawnAgentInThread(
     lastActivityAt: now,
   };
   sessions.push(entry);
-  await saveThreadSessions(ctx, threadId, sessions);
+  await saveThreadSessions(ctx, threadId, sessions, companyId);
   await ctx.metrics.write(METRIC_NAMES.agentSessionsCreated, 1);
 
   if (running.length > 0) {
@@ -357,7 +366,7 @@ export async function closeAgentInThread(
   agentName: string,
   companyId: string,
 ): Promise<{ ok: boolean; error?: string }> {
-  const sessions = await getThreadSessions(ctx, threadId);
+  const sessions = await getThreadSessions(ctx, threadId, companyId);
   const target = sessions.find(
     (s) => s.agentName.toLowerCase() === agentName.toLowerCase() && s.status === "running",
   );
@@ -367,7 +376,7 @@ export async function closeAgentInThread(
   }
 
   target.status = "completed";
-  await saveThreadSessions(ctx, threadId, sessions);
+  await saveThreadSessions(ctx, threadId, sessions, companyId);
 
   // Close the underlying session
   try {
@@ -438,7 +447,7 @@ export async function routeMessageToAgent(
   companyId: string,
   replyToSessionId?: string,
 ): Promise<boolean> {
-  const sessions = await getThreadSessions(ctx, threadId);
+  const sessions = await getThreadSessions(ctx, threadId, companyId);
   const running = sessions.filter((s) => s.status === "running");
   if (running.length === 0) return false;
 
@@ -462,9 +471,9 @@ export async function routeMessageToAgent(
   if (!target) return false;
 
   // Check for active discussion checkpoint
-  const discussionId = await findActiveDiscussion(ctx, threadId);
+  const discussionId = await findActiveDiscussion(ctx, threadId, companyId);
   if (discussionId) {
-    const discussion = await getDiscussion(ctx, discussionId);
+    const discussion = await getDiscussion(ctx, discussionId, companyId);
     if (discussion && discussion.status === "paused_checkpoint") {
       discussion.status = "active";
       discussion.lastActivityAt = new Date().toISOString();
@@ -474,7 +483,7 @@ export async function routeMessageToAgent(
 
   // Update last activity
   target.lastActivityAt = new Date().toISOString();
-  await saveThreadSessions(ctx, threadId, sessions);
+  await saveThreadSessions(ctx, threadId, sessions, companyId);
 
   // Route via the correct transport
   try {
@@ -522,12 +531,14 @@ export async function handleAcpOutput(
     threadId: string;
     agentName: string;
     output: string;
+    companyId?: string;
     status?: "running" | "completed" | "failed";
   },
 ): Promise<void> {
   const { sessionId, threadId, agentName, output, status } = event;
+  const eventCompanyId = event.companyId || "default";
 
-  let sessions = await getThreadSessions(ctx, threadId);
+  let sessions = await getThreadSessions(ctx, threadId, eventCompanyId);
   let session = sessions.find((s) => s.sessionId === sessionId);
 
   if (!session) {
@@ -537,7 +548,7 @@ export async function handleAcpOutput(
       agentId: "",
       agentName,
       agentDisplayName: agentName,
-      companyId: "default",
+      companyId: eventCompanyId,
       transport: "acp",
       spawnedAt: now,
       status: "running",
@@ -550,7 +561,7 @@ export async function handleAcpOutput(
     session.status = status;
   }
   session.lastActivityAt = new Date().toISOString();
-  await saveThreadSessions(ctx, threadId, sessions);
+  await saveThreadSessions(ctx, threadId, sessions, eventCompanyId);
 
   const multiAgent =
     sessions.filter((s) => s.status === "running" || s.sessionId === sessionId).length > 1;
@@ -571,7 +582,7 @@ export async function handleAcpOutput(
     });
   }
 
-  const discussionId = await findActiveDiscussion(ctx, threadId);
+  const discussionId = await findActiveDiscussion(ctx, threadId, eventCompanyId);
   if (discussionId) {
     await advanceDiscussion(ctx, token, threadId, discussionId, agentName);
   }
@@ -666,8 +677,9 @@ export async function createAgentThread(
 export async function getThreadStatus(
   ctx: PluginContext,
   threadId: string,
+  companyId?: string,
 ): Promise<{ sessions: AgentSessionEntry[] }> {
-  const sessions = await getThreadSessions(ctx, threadId);
+  const sessions = await getThreadSessions(ctx, threadId, companyId);
   return { sessions };
 }
 
@@ -749,6 +761,7 @@ export async function handleHandoffButton(
   const action = parts[1];
   const handoffId = parts.slice(2).join("_");
 
+  // No companyId available yet — fallback read will check "default" scope
   const record = await getHandoff(ctx, handoffId);
   if (!record) {
     return respondToInteraction({ type: 4, content: `Handoff \`${handoffId}\` not found.`, ephemeral: true });
@@ -851,7 +864,7 @@ export async function startDiscussion(
   await saveDiscussion(ctx, record);
 
   await ctx.state.set(
-    { scopeKind: "company", scopeId: "default", stateKey: `active_discussion_${threadId}` },
+    { scopeKind: "company", scopeId: companyId, stateKey: `active_discussion_${threadId}` },
     discussionId,
   );
 
@@ -895,12 +908,13 @@ async function advanceDiscussion(
 ): Promise<void> {
   const discussion = await getDiscussion(ctx, discussionId);
   if (!discussion || discussion.status !== "active") return;
+  const discCompanyId = discussion.companyId || "default";
 
   const elapsed = Date.now() - new Date(discussion.lastActivityAt).getTime();
   if (elapsed > DISCUSSION_STALE_MS) {
     discussion.status = "stale";
     await saveDiscussion(ctx, discussion);
-    await clearActiveDiscussion(ctx, threadId);
+    await clearActiveDiscussion(ctx, threadId, discCompanyId);
     await postEmbed(ctx, token, threadId, {
       embeds: [{
         title: "Discussion Stale",
@@ -919,7 +933,7 @@ async function advanceDiscussion(
   if (discussion.currentTurn >= discussion.maxTurns) {
     discussion.status = "completed";
     await saveDiscussion(ctx, discussion);
-    await clearActiveDiscussion(ctx, threadId);
+    await clearActiveDiscussion(ctx, threadId, discCompanyId);
     await postEmbed(ctx, token, threadId, {
       embeds: [{
         title: "Discussion Complete",
@@ -1042,7 +1056,7 @@ export async function handleDiscussionButton(
   if (action === "end") {
     discussion.status = "cancelled";
     await saveDiscussion(ctx, discussion);
-    await clearActiveDiscussion(ctx, discussion.threadId);
+    await clearActiveDiscussion(ctx, discussion.threadId, discussion.companyId || "default");
 
     return {
       type: 7,

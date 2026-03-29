@@ -6,6 +6,11 @@ type Payload = Record<string, unknown>;
 
 const DEFAULT_BASE_URL = "http://localhost:3100";
 
+function resolveBaseUrl(baseUrl?: string): string {
+  const url = baseUrl || DEFAULT_BASE_URL;
+  return url.endsWith("/") ? url.slice(0, -1) : url;
+}
+
 export function formatIssueCreated(event: PluginEvent, baseUrl?: string): DiscordMessage {
   const p = event.payload as Payload;
   const identifier = String(p.identifier ?? event.entityId);
@@ -31,7 +36,7 @@ export function formatIssueCreated(event: PluginEvent, baseUrl?: string): Discor
     }
   }
 
-  const dashboardUrl = `${baseUrl ?? DEFAULT_BASE_URL}/issues/${event.entityId}`;
+  const dashboardUrl = `${resolveBaseUrl(baseUrl)}/issues/${event.entityId}`;
 
   return {
     embeds: [
@@ -73,7 +78,7 @@ export function formatIssueDone(event: PluginEvent, baseUrl?: string): DiscordMe
   if (status) fields.push({ name: "Status", value: `\`${status}\``, inline: true });
   if (priority) fields.push({ name: "Priority", value: `\`${priority}\``, inline: true });
 
-  const dashboardUrl = `${baseUrl ?? DEFAULT_BASE_URL}/issues/${event.entityId}`;
+  const dashboardUrl = `${resolveBaseUrl(baseUrl)}/issues/${event.entityId}`;
 
   return {
     embeds: [
@@ -110,7 +115,7 @@ export function formatApprovalCreated(event: PluginEvent, baseUrl?: string): Dis
   const description = String(p.description ?? "");
   const agentName = String(p.agentName ?? "");
   const issueIds = Array.isArray(p.issueIds) ? p.issueIds as string[] : [];
-  const dashboardUrl = `${baseUrl ?? DEFAULT_BASE_URL}/approvals/${approvalId}`;
+  const dashboardUrl = `${resolveBaseUrl(baseUrl)}/approvals/${approvalId}`;
 
   const fields: Array<{ name: string; value: string; inline?: boolean }> = [];
   if (agentName) fields.push({ name: "Agent", value: agentName, inline: true });

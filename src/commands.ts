@@ -5,6 +5,7 @@ import { withRetry, throwOnRetryableStatus } from "./retry.js";
 import { paperclipFetch } from "./paperclip-fetch.js";
 import { handleHandoffButton, handleDiscussionButton, handleAcpCommand } from "./session-registry.js";
 import { resolveCompanyId } from "./company-resolver.js";
+import { getEscalation } from "./escalation-state.js";
 import {
   type Workflow,
   type WorkflowStep,
@@ -1002,17 +1003,10 @@ async function handleEscalationButton(
 
   ctx.logger.info("Escalation button clicked", { escalationId, action, actor });
 
-  const record = await ctx.state.get({
-    scopeKind: "company",
-    scopeId: "default",
-    stateKey: `escalation_${escalationId}`,
-  }) as {
-    escalationId: string;
-    companyId: string;
-    agentName: string;
-    reason: string;
-    suggestedReply?: string;
-    status: string;
+  const resolvedCompanyId = await resolveCompanyId(ctx);
+  const record = await getEscalation(ctx, escalationId, resolvedCompanyId) as {
+    escalationId: string; companyId: string; agentName: string;
+    reason: string; suggestedReply?: string; status: string;
   } | null;
 
   if (!record) {
@@ -1026,9 +1020,9 @@ async function handleEscalationButton(
   const companyId = record.companyId || "default";
 
   const resolveRecord = async (resolution: string): Promise<void> => {
-    record.status = "resolved";
+    record!.status = "resolved";
     await ctx.state.set(
-      { scopeKind: "company", scopeId: "default", stateKey: `escalation_${escalationId}` },
+      { scopeKind: "company", scopeId: companyId, stateKey: `escalation_${escalationId}` },
       {
         ...record,
         resolvedAt: new Date().toISOString(),

@@ -232,3 +232,59 @@ describe("escalation embed structure", () => {
     expect(viewBtn?.url).toBeDefined();
   });
 });
+
+describe("approval View button URL uses configured base URL", () => {
+  it("uses provided baseUrl in the View button URL", () => {
+    const msg = formatApprovalCreated(
+      makeEvent({ payload: { approvalId: "apr-99" } }),
+      "https://app.paperclip.ing",
+    );
+    const viewBtn = msg.components?.[0]?.components?.[2];
+    expect(viewBtn?.url).toBe("https://app.paperclip.ing/approvals/apr-99");
+  });
+
+  it("falls back to DEFAULT_BASE_URL when baseUrl is undefined", () => {
+    const msg = formatApprovalCreated(
+      makeEvent({ payload: { approvalId: "apr-99" } }),
+    );
+    const viewBtn = msg.components?.[0]?.components?.[2];
+    expect(viewBtn?.url).toBe("http://localhost:3100/approvals/apr-99");
+  });
+
+  it("falls back to DEFAULT_BASE_URL when baseUrl is empty string", () => {
+    const msg = formatApprovalCreated(
+      makeEvent({ payload: { approvalId: "apr-99" } }),
+      "",
+    );
+    const viewBtn = msg.components?.[0]?.components?.[2];
+    // Empty string is falsy but not nullish — should still fall back
+    expect(viewBtn?.url).toBe("http://localhost:3100/approvals/apr-99");
+  });
+
+  it("strips trailing slash from baseUrl to avoid double-slash", () => {
+    const msg = formatApprovalCreated(
+      makeEvent({ payload: { approvalId: "apr-99" } }),
+      "https://app.paperclip.ing/",
+    );
+    const viewBtn = msg.components?.[0]?.components?.[2];
+    expect(viewBtn?.url).toBe("https://app.paperclip.ing/approvals/apr-99");
+  });
+
+  it("uses entityId when approvalId not in payload", () => {
+    const msg = formatApprovalCreated(
+      makeEvent({ entityId: "entity-abc" }),
+      "https://app.paperclip.ing",
+    );
+    const viewBtn = msg.components?.[0]?.components?.[2];
+    expect(viewBtn?.url).toBe("https://app.paperclip.ing/approvals/entity-abc");
+  });
+
+  it("View button URL for issue.created also uses configured baseUrl", () => {
+    const msg = formatIssueCreated(
+      makeEvent({ entityId: "issue-42" }),
+      "https://app.paperclip.ing",
+    );
+    const viewBtn = msg.components?.[0]?.components?.[0];
+    expect(viewBtn?.url).toBe("https://app.paperclip.ing/issues/issue-42");
+  });
+});

@@ -47,6 +47,14 @@ let _pluginCtx: PluginContext | null = null;
 let _cmdCtx: CommandContext | null = null;
 
 import { resolveCompanyId } from "./company-resolver.js";
+import {
+  type EscalationRecord,
+  getEscalation,
+  saveEscalation,
+  trackPendingEscalation,
+  untrackPendingEscalation,
+  collectPendingEscalationIds,
+} from "./escalation-state.js";
 
 type DiscordConfig = {
   discordBotTokenRef: string;
@@ -82,23 +90,7 @@ type DiscordConfig = {
   tridailyTimes: string;
 };
 
-interface EscalationRecord {
-  escalationId: string;
-  companyId: string;
-  agentName: string;
-  reason: string;
-  confidenceScore?: number;
-  agentReasoning?: string;
-  conversationHistory?: Array<{ role: string; content: string }>;
-  suggestedReply?: string;
-  channelId: string;
-  messageId: string;
-  status: "pending" | "resolved" | "timed_out";
-  createdAt: string;
-  resolvedAt?: string;
-  resolvedBy?: string;
-  resolution?: string;
-}
+// EscalationRecord is imported from ./escalation-state.js
 
 interface EscalationCreatedPayload {
   escalationId: string;
@@ -195,11 +187,20 @@ const plugin = definePlugin({
 
       if (mapping.entityType === "escalation") {
         // Route to escalation response
-        const record = await ctx.state.get({
+        const escalationCompanyId = mapping.companyId || "default";
+        let record = await ctx.state.get({
           scopeKind: "company",
-          scopeId: "default",
+          scopeId: escalationCompanyId,
           stateKey: `escalation_${mapping.entityId}`,
         }) as EscalationRecord | null;
+        // Backward-compat fallback: check "default" scope if company-scoped read returns null
+        if (!record && escalationCompanyId !== "default") {
+          record = await ctx.state.get({
+            scopeKind: "company",
+            scopeId: "default",
+            stateKey: `escalation_${mapping.entityId}`,
+          }) as EscalationRecord | null;
+        }
 
         if (record && record.status === "pending") {
           record.status = "resolved";
@@ -207,7 +208,7 @@ const plugin = definePlugin({
           record.resolvedBy = `discord:${message.author.username}`;
           record.resolution = "human_reply";
           await ctx.state.set(
-            { scopeKind: "company", scopeId: "default", stateKey: `escalation_${mapping.entityId}` },
+            { scopeKind: "company", scopeId: escalationCompanyId, stateKey: `escalation_${mapping.entityId}` },
             record,
           );
           await ctx.metrics.write(METRIC_NAMES.escalationsResolved, 1);
@@ -352,51 +353,12 @@ const plugin = definePlugin({
     const escalationChannelId = config.escalationChannelId || config.defaultChannelId;
     const escalationTimeoutMs = (config.escalationTimeoutMinutes || 30) * 60 * 1000;
 
-    async function getEscalation(escalationId: string): Promise<EscalationRecord | null> {
-      const raw = await ctx.state.get({
-        scopeKind: "company",
-        scopeId: "default",
-        stateKey: `escalation_${escalationId}`,
-      });
-      return (raw as EscalationRecord) ?? null;
-    }
-
-    async function saveEscalation(record: EscalationRecord): Promise<void> {
-      await ctx.state.set(
-        { scopeKind: "company", scopeId: "default", stateKey: `escalation_${record.escalationId}` },
-        record,
-      );
-    }
-
-    async function trackPendingEscalation(escalationId: string): Promise<void> {
-      const raw = await ctx.state.get({
-        scopeKind: "company",
-        scopeId: "default",
-        stateKey: "escalation_pending_ids",
-      });
-      const ids = (raw as string[]) ?? [];
-      if (!ids.includes(escalationId)) {
-        ids.push(escalationId);
-        await ctx.state.set(
-          { scopeKind: "company", scopeId: "default", stateKey: "escalation_pending_ids" },
-          ids,
-        );
-      }
-    }
-
-    async function untrackPendingEscalation(escalationId: string): Promise<void> {
-      const raw = await ctx.state.get({
-        scopeKind: "company",
-        scopeId: "default",
-        stateKey: "escalation_pending_ids",
-      });
-      const ids = (raw as string[]) ?? [];
-      const filtered = ids.filter((id) => id !== escalationId);
-      await ctx.state.set(
-        { scopeKind: "company", scopeId: "default", stateKey: "escalation_pending_ids" },
-        filtered,
-      );
-    }
+    // Escalation state helpers are imported from ./escalation-state.js
+    // Local wrappers that close over ctx for call-site convenience:
+    const _getEscalation = (id: string, cid?: string) => getEscalation(ctx, id, cid);
+    const _saveEscalation = (r: EscalationRecord) => saveEscalation(ctx, r);
+    const _trackPending = (id: string, cid?: string) => trackPendingEscalation(ctx, id, cid);
+    const _untrackPending = (id: string, cid?: string) => untrackPendingEscalation(ctx, id, cid);
 
     function buildEscalationEmbed(payload: EscalationCreatedPayload): {
       embeds: DiscordEmbed[];
@@ -490,8 +452,8 @@ const plugin = definePlugin({
             status: "pending",
             createdAt: new Date().toISOString(),
           };
-          await saveEscalation(record);
-          await trackPendingEscalation(escalationId);
+          await _saveEscalation(record);
+          await _trackPending(escalationId, event.companyId);
           await ctx.metrics.write(METRIC_NAMES.escalationsCreated, 1);
 
           await ctx.activity.log({
@@ -571,8 +533,8 @@ const plugin = definePlugin({
             status: "pending",
             createdAt: new Date().toISOString(),
           };
-          await saveEscalation(record);
-          await trackPendingEscalation(escalationId);
+          await _saveEscalation(record);
+          await _trackPending(escalationId, escalationCompanyId);
           await ctx.metrics.write(METRIC_NAMES.escalationsCreated, 1);
         }
 
@@ -675,20 +637,16 @@ const plugin = definePlugin({
     // ===================================================================
 
     ctx.jobs.register("check-escalation-timeouts", async () => {
-      const raw = await ctx.state.get({
-        scopeKind: "company",
-        scopeId: "default",
-        stateKey: "escalation_pending_ids",
-      });
-      const pendingIds = (raw as string[]) ?? [];
+      const jobCompanyId = await resolveCompanyId(ctx);
+      const pendingIds = await collectPendingEscalationIds(ctx, jobCompanyId);
       if (pendingIds.length === 0) return;
 
       const now = Date.now();
 
       for (const escalationId of pendingIds) {
-        const record = await getEscalation(escalationId);
+        const record = await _getEscalation(escalationId, jobCompanyId);
         if (!record || record.status !== "pending") {
-          await untrackPendingEscalation(escalationId);
+          await _untrackPending(escalationId, record?.companyId || jobCompanyId);
           continue;
         }
 
@@ -697,8 +655,8 @@ const plugin = definePlugin({
 
         record.status = "timed_out";
         record.resolvedAt = new Date().toISOString();
-        await saveEscalation(record);
-        await untrackPendingEscalation(escalationId);
+        await _saveEscalation(record);
+        await _untrackPending(escalationId, record.companyId || jobCompanyId);
         await ctx.metrics.write(METRIC_NAMES.escalationsTimedOut, 1);
 
         await adapter.editMessage(record.channelId, record.messageId, {
