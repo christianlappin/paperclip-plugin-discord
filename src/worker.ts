@@ -765,11 +765,16 @@ const plugin = definePlugin({
         },
       );
 
-      ctx.jobs.register("check-watches", async () => {
-        const cid = await resolveCompanyId(ctx);
-        await checkWatches(ctx, token, cid, config.defaultChannelId);
-      });
     }
+
+    ctx.jobs.register("check-watches", async () => {
+      if (config.enableProactiveSuggestions === false) {
+        ctx.logger.debug("check-watches: proactive suggestions disabled, skipping");
+        return;
+      }
+      const cid = await resolveCompanyId(ctx);
+      await checkWatches(ctx, token, cid, config.defaultChannelId);
+    });
 
     // ===================================================================
     // Daily Digest Job
@@ -777,115 +782,117 @@ const plugin = definePlugin({
 
     const effectiveDigestMode = config.digestMode ?? "off";
 
-    if (effectiveDigestMode !== "off") {
-      ctx.jobs.register("discord-daily-digest", async () => {
-        const nowHour = new Date().getUTCHours();
-        const nowMin = new Date().getUTCMinutes();
-        if (nowMin >= 5) return; // only fire within first 5 min of the hour
+    ctx.jobs.register("discord-daily-digest", async () => {
+      if (effectiveDigestMode === "off") {
+        ctx.logger.debug("discord-daily-digest: digest mode is off, skipping");
+        return;
+      }
+      const nowHour = new Date().getUTCHours();
+      const nowMin = new Date().getUTCMinutes();
+      if (nowMin >= 5) return; // only fire within first 5 min of the hour
 
-        const parseHour = (t: string) => {
-          const [h] = (t || "").split(":");
-          return parseInt(h ?? "", 10);
-        };
-        const firstHour = parseHour(config.dailyDigestTime || "09:00");
-        const secondHour = parseHour(config.bidailySecondTime || "17:00");
-        const tridailyHours = (config.tridailyTimes || "07:00,13:00,19:00")
-          .split(",")
-          .map((t) => parseHour(t.trim()));
+      const parseHour = (t: string) => {
+        const [h] = (t || "").split(":");
+        return parseInt(h ?? "", 10);
+      };
+      const firstHour = parseHour(config.dailyDigestTime || "09:00");
+      const secondHour = parseHour(config.bidailySecondTime || "17:00");
+      const tridailyHours = (config.tridailyTimes || "07:00,13:00,19:00")
+        .split(",")
+        .map((t) => parseHour(t.trim()));
 
-        let shouldSend = false;
-        if (effectiveDigestMode === "daily") {
-          shouldSend = nowHour === firstHour;
-        } else if (effectiveDigestMode === "bidaily") {
-          shouldSend = nowHour === firstHour || nowHour === secondHour;
-        } else if (effectiveDigestMode === "tridaily") {
-          shouldSend = tridailyHours.includes(nowHour);
-        }
-        if (!shouldSend) return;
+      let shouldSend = false;
+      if (effectiveDigestMode === "daily") {
+        shouldSend = nowHour === firstHour;
+      } else if (effectiveDigestMode === "bidaily") {
+        shouldSend = nowHour === firstHour || nowHour === secondHour;
+      } else if (effectiveDigestMode === "tridaily") {
+        shouldSend = tridailyHours.includes(nowHour);
+      }
+      if (!shouldSend) return;
 
-        const companies = await ctx.companies.list();
-        for (const company of companies) {
-          const channelId = await resolveChannel(ctx, company.id, config.defaultChannelId);
-          if (!channelId) continue;
+      const companies = await ctx.companies.list();
+      for (const company of companies) {
+        const channelId = await resolveChannel(ctx, company.id, config.defaultChannelId);
+        if (!channelId) continue;
 
-          try {
-            const agents = await ctx.agents.list({ companyId: company.id });
-            const activeAgents = agents.filter((a: { status: string }) => a.status === "active");
-            const issues = await ctx.issues.list({ companyId: company.id, limit: 50 });
+        try {
+          const agents = await ctx.agents.list({ companyId: company.id });
+          const activeAgents = agents.filter((a: { status: string }) => a.status === "active");
+          const issues = await ctx.issues.list({ companyId: company.id, limit: 50 });
 
-            const now = Date.now();
-            const oneDayMs = 24 * 60 * 60 * 1000;
-            const completedToday = issues.filter((i: { status: string; completedAt?: Date | null }) =>
-              i.status === "done" && i.completedAt && (now - new Date(i.completedAt).getTime()) < oneDayMs
-            );
-            const createdToday = issues.filter((i: { createdAt: Date }) =>
-              (now - new Date(i.createdAt).getTime()) < oneDayMs
-            );
+          const now = Date.now();
+          const oneDayMs = 24 * 60 * 60 * 1000;
+          const completedToday = issues.filter((i: { status: string; completedAt?: Date | null }) =>
+            i.status === "done" && i.completedAt && (now - new Date(i.completedAt).getTime()) < oneDayMs
+          );
+          const createdToday = issues.filter((i: { createdAt: Date }) =>
+            (now - new Date(i.createdAt).getTime()) < oneDayMs
+          );
 
-            const inProgress = issues.filter((i: { status: string }) => i.status === "in_progress");
-            const inReview = issues.filter((i: { status: string }) => i.status === "in_review");
-            const blocked = issues.filter((i: { status: string }) => i.status === "blocked");
+          const inProgress = issues.filter((i: { status: string }) => i.status === "in_progress");
+          const inReview = issues.filter((i: { status: string }) => i.status === "in_review");
+          const blocked = issues.filter((i: { status: string }) => i.status === "blocked");
 
-            const dateStr = new Date().toISOString().split("T")[0];
-            const digestLabel = effectiveDigestMode === "bidaily" ? "Digest" : "Daily Digest";
-            const companyLabel = company.name ? ` — ${company.name}` : "";
+          const dateStr = new Date().toISOString().split("T")[0];
+          const digestLabel = effectiveDigestMode === "bidaily" ? "Digest" : "Daily Digest";
+          const companyLabel = company.name ? ` — ${company.name}` : "";
 
-            const fields: Array<{ name: string; value: string; inline?: boolean }> = [
-              { name: "✅ Tasks Completed", value: String(completedToday.length), inline: true },
-              { name: "📋 Tasks Created", value: String(createdToday.length), inline: true },
-              { name: "🤖 Active Agents", value: `${activeAgents.length}/${agents.length}`, inline: true },
-            ];
+          const fields: Array<{ name: string; value: string; inline?: boolean }> = [
+            { name: "✅ Tasks Completed", value: String(completedToday.length), inline: true },
+            { name: "📋 Tasks Created", value: String(createdToday.length), inline: true },
+            { name: "🤖 Active Agents", value: `${activeAgents.length}/${agents.length}`, inline: true },
+          ];
 
-            if (activeAgents.length > 0) {
-              fields.push({
-                name: "⭐ Top Performer",
-                value: (activeAgents[0] as { name: string }).name,
-                inline: true,
-              });
-            }
-
-            const formatIssueList = (items: Array<{ identifier?: string | null; id: string; title: string }>) =>
-              items.slice(0, 10).map((i) => `• **${i.identifier ?? i.id}** — ${i.title}`).join("\n");
-
-            if (inProgress.length > 0) {
-              fields.push({ name: `🔄 In Progress (${inProgress.length})`, value: formatIssueList(inProgress) });
-            }
-            if (inReview.length > 0) {
-              fields.push({ name: `🔍 In Review (${inReview.length})`, value: formatIssueList(inReview) });
-            }
-            if (blocked.length > 0) {
-              fields.push({ name: `🚫 Blocked (${blocked.length})`, value: formatIssueList(blocked) });
-            }
-
-            const embeds: DiscordEmbed[] = [
-              {
-                title: `📊 ${digestLabel}${companyLabel} — ${dateStr}`,
-                color: COLORS.BLUE,
-                fields,
-                footer: { text: "Paperclip" },
-                timestamp: new Date().toISOString(),
-              },
-            ];
-
-            await postEmbed(ctx, token, channelId, { embeds });
-            await ctx.metrics.write(METRIC_NAMES.digestSent, 1);
-          } catch (err) {
-            ctx.logger.error("Daily digest failed for company", { companyId: company.id, error: String(err) });
-            await postEmbed(ctx, token, channelId, {
-              embeds: [{
-                title: "📊 Daily Digest",
-                description: "Could not generate digest. Check plugin logs for details.",
-                color: COLORS.RED,
-                footer: { text: "Paperclip" },
-                timestamp: new Date().toISOString(),
-              }],
+          if (activeAgents.length > 0) {
+            fields.push({
+              name: "⭐ Top Performer",
+              value: (activeAgents[0] as { name: string }).name,
+              inline: true,
             });
           }
-        }
-      });
 
-      ctx.logger.info("Daily digest job registered", { mode: effectiveDigestMode });
-    }
+          const formatIssueList = (items: Array<{ identifier?: string | null; id: string; title: string }>) =>
+            items.slice(0, 10).map((i) => `• **${i.identifier ?? i.id}** — ${i.title}`).join("\n");
+
+          if (inProgress.length > 0) {
+            fields.push({ name: `🔄 In Progress (${inProgress.length})`, value: formatIssueList(inProgress) });
+          }
+          if (inReview.length > 0) {
+            fields.push({ name: `🔍 In Review (${inReview.length})`, value: formatIssueList(inReview) });
+          }
+          if (blocked.length > 0) {
+            fields.push({ name: `🚫 Blocked (${blocked.length})`, value: formatIssueList(blocked) });
+          }
+
+          const embeds: DiscordEmbed[] = [
+            {
+              title: `📊 ${digestLabel}${companyLabel} — ${dateStr}`,
+              color: COLORS.BLUE,
+              fields,
+              footer: { text: "Paperclip" },
+              timestamp: new Date().toISOString(),
+            },
+          ];
+
+          await postEmbed(ctx, token, channelId, { embeds });
+          await ctx.metrics.write(METRIC_NAMES.digestSent, 1);
+        } catch (err) {
+          ctx.logger.error("Daily digest failed for company", { companyId: company.id, error: String(err) });
+          await postEmbed(ctx, token, channelId, {
+            embeds: [{
+              title: "📊 Daily Digest",
+              description: "Could not generate digest. Check plugin logs for details.",
+              color: COLORS.RED,
+              footer: { text: "Paperclip" },
+              timestamp: new Date().toISOString(),
+            }],
+          });
+        }
+      }
+    });
+
+    ctx.logger.info("Daily digest job registered", { mode: effectiveDigestMode });
 
     // --- Per-company channel overrides ---
 
@@ -952,18 +959,22 @@ const plugin = definePlugin({
 
     // --- Intelligence: scheduled scan ---
 
+    ctx.jobs.register("discord-intelligence-scan", async () => {
+      if (!config.enableIntelligence || !config.intelligenceChannelIds?.length) {
+        ctx.logger.debug("discord-intelligence-scan: intelligence disabled or no channels configured, skipping");
+        return;
+      }
+      const cid = await resolveCompanyId(ctx);
+      await runIntelligenceScan(
+        ctx,
+        token,
+        config.defaultGuildId,
+        config.intelligenceChannelIds,
+        cid,
+        retentionDays,
+      );
+    });
     if (config.enableIntelligence && config.intelligenceChannelIds.length > 0) {
-      ctx.jobs.register("discord-intelligence-scan", async () => {
-        const cid = await resolveCompanyId(ctx);
-        await runIntelligenceScan(
-          ctx,
-          token,
-          config.defaultGuildId,
-          config.intelligenceChannelIds,
-          cid,
-          retentionDays,
-        );
-      });
       ctx.logger.info("Intelligence scan job registered", {
         channels: config.intelligenceChannelIds.length,
       });
