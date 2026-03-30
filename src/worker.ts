@@ -276,6 +276,24 @@ const plugin = definePlugin({
       await handleAcpOutput(ctx, token, payload);
     });
 
+    // --- Event deduplication ---
+    // The runtime may redeliver events (retries, replays). Track recently
+    // processed eventIds so each event produces at most one Discord message.
+    const DEDUP_TTL_MS = 5 * 60 * 1000; // 5 minutes
+    const seenEvents = new Map<string, number>(); // eventId → timestamp
+
+    function isDuplicate(eventId: string | undefined): boolean {
+      if (!eventId) return false;
+      const now = Date.now();
+      // Prune stale entries on each check (cheap for small maps)
+      for (const [id, ts] of seenEvents) {
+        if (now - ts > DEDUP_TTL_MS) seenEvents.delete(id);
+      }
+      if (seenEvents.has(eventId)) return true;
+      seenEvents.set(eventId, now);
+      return false;
+    }
+
     // --- Event subscriptions ---
 
     const notify = async (
@@ -283,6 +301,11 @@ const plugin = definePlugin({
       formatter: (e: PluginEvent, baseUrl?: string) => ReturnType<typeof formatIssueCreated>,
       overrideChannelId?: string,
     ) => {
+      if (isDuplicate(event.eventId)) {
+        ctx.logger.debug(`Skipping duplicate event ${event.eventType} (${event.eventId})`);
+        return;
+      }
+
       const channelId = await resolveChannel(ctx, event.companyId, overrideChannelId || config.defaultChannelId);
       if (!channelId) return;
 
@@ -427,6 +450,11 @@ const plugin = definePlugin({
 
     if (config.enableEscalations !== false) {
       ctx.events.on(`plugin.${PLUGIN_ID}.escalation-created`, async (event: PluginEvent) => {
+        if (isDuplicate(event.eventId)) {
+          ctx.logger.debug(`Skipping duplicate escalation event (${event.eventId})`);
+          return;
+        }
+
         const payload = event.payload as unknown as EscalationCreatedPayload;
         const escalationId = payload.escalationId || event.entityId || "";
         payload.escalationId = escalationId;
