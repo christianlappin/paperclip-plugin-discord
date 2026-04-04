@@ -102,10 +102,12 @@ describe("company ID resolution", () => {
 
     await handleInteraction(ctx, statusInteraction() as any, cmdCtx);
 
-    expect(ctx.issues.list).toHaveBeenCalledTimes(1);
-    const callArg = ctx.issues.list.mock.calls[0][0];
-    expect(callArg.companyId).toBe(REAL_COMPANY_ID);
-    expect(callArg.companyId).not.toBe("default");
+    // handleStatus now queries both in_progress and done issues
+    expect(ctx.issues.list).toHaveBeenCalledTimes(2);
+    for (const call of ctx.issues.list.mock.calls) {
+      expect(call[0].companyId).toBe(REAL_COMPANY_ID);
+      expect(call[0].companyId).not.toBe("default");
+    }
   });
 
   it("passes real UUID to agents.list for /clip agents", async () => {

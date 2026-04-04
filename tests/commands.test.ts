@@ -82,7 +82,10 @@ describe("handleInteraction", () => {
 });
 
 describe("/clip status", () => {
-  it("returns agent and issue data", async () => {
+  it("returns agent and issue data with active work and completions", async () => {
+    const issuesList = vi.fn()
+      .mockResolvedValueOnce([{ id: "i2", identifier: "PROJ-2", title: "Active task", executionAgentNameKey: "engineer" }]) // in_progress
+      .mockResolvedValueOnce([{ id: "i1", identifier: "PROJ-1", title: "Done task" }]); // done
     const ctx = makeCtx({
       agents: {
         list: vi.fn().mockResolvedValue([
@@ -91,11 +94,7 @@ describe("/clip status", () => {
         sessions: { create: vi.fn(), sendMessage: vi.fn(), close: vi.fn() },
         invoke: vi.fn(),
       },
-      issues: {
-        list: vi.fn().mockResolvedValue([
-          { id: "i1", identifier: "PROJ-1", title: "Done task" },
-        ]),
-      },
+      issues: { list: issuesList },
     });
 
     const result = await handleInteraction(
@@ -107,9 +106,34 @@ describe("/clip status", () => {
     expect(result.type).toBe(4);
     const embed = result.data.embeds[0];
     expect(embed.title).toBe("Paperclip Status");
-    expect(embed.fields).toHaveLength(2);
+    expect(embed.fields).toHaveLength(3);
     expect(embed.fields[0].value).toContain("BD Agent");
-    expect(embed.fields[1].value).toContain("PROJ-1");
+    expect(embed.fields[1].name).toContain("In Progress");
+    expect(embed.fields[1].value).toContain("PROJ-2");
+    expect(embed.fields[1].value).toContain("engineer");
+    expect(embed.fields[2].name).toContain("Recent Completions");
+    expect(embed.fields[2].value).toContain("PROJ-1");
+  });
+
+  it("queries in_progress issues for active work (Bug 2 regression)", async () => {
+    const issuesList = vi.fn().mockResolvedValue([]);
+    const ctx = makeCtx({
+      issues: { list: issuesList },
+    });
+
+    await handleInteraction(
+      ctx,
+      { type: 2, data: { name: "clip", options: [{ name: "status" }] } },
+      defaultCmdCtx,
+    );
+
+    // Must query for in_progress (active work) AND done (completions)
+    expect(issuesList).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "in_progress" }),
+    );
+    expect(issuesList).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "done" }),
+    );
   });
 
   it("shows agent title in status when available", async () => {
@@ -146,7 +170,8 @@ describe("/clip status", () => {
 
     const embed = result.data.embeds[0];
     expect(embed.fields[0].value).toContain("No active agents");
-    expect(embed.fields[1].value).toContain("No recent completions");
+    expect(embed.fields[1].value).toContain("No active work");
+    expect(embed.fields[2].value).toContain("No recent completions");
   });
 });
 
