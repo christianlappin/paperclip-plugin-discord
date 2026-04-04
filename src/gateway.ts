@@ -77,6 +77,14 @@ export async function connectGateway(
   onInteraction: InteractionHandler,
   onMessage?: MessageHandler,
 ): Promise<{ close: () => void }> {
+  if (typeof WebSocket === "undefined") {
+    ctx.logger.warn(
+      "WebSocket is not available in this environment (requires Node.js >= 21). " +
+      "Gateway connection disabled — interactions will only work via webhook.",
+    );
+    return { close: () => {} };
+  }
+
   const gatewayUrl = await getGatewayUrl(ctx, token);
   if (!gatewayUrl) {
     ctx.logger.warn("Could not get Gateway URL, interactions will only work via webhook");
