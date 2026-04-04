@@ -52,7 +52,12 @@ export async function respondViaCallback(
 ): Promise<void> {
   const url = `${DISCORD_API_BASE}/interactions/${interactionId}/${interactionToken}/callback`;
   try {
-    const response = await ctx.http.fetch(url, {
+    // Use native fetch instead of ctx.http.fetch because Discord returns 204
+    // on success.  The SDK's http.fetch reconstructs a Response object via
+    // `new Response(body, { status })` which throws when the body is non-null
+    // and the status is a null-body status (204).  Native fetch handles this
+    // correctly and the interaction callback does not need SDK audit tracing.
+    const response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(responseData),

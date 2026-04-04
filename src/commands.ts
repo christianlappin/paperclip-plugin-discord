@@ -497,8 +497,11 @@ async function handleAutocomplete(
 
 async function handleStatus(ctx: PluginContext, companyId: string): Promise<unknown> {
   try {
-    const agents = await ctx.agents.list({ companyId, status: "active" });
-    const issues = await ctx.issues.list({ companyId, status: "done", limit: 5 });
+    const [agents, activeIssues, doneIssues] = await Promise.all([
+      ctx.agents.list({ companyId, status: "active" }),
+      ctx.issues.list({ companyId, status: "in_progress", limit: 10 }),
+      ctx.issues.list({ companyId, status: "done", limit: 5 }),
+    ]);
 
     const agentList = agents.length > 0
       ? agents.map((a: { name?: string | null; id: string; title?: string | null; role?: string | null }) => {
@@ -508,8 +511,16 @@ async function handleStatus(ctx: PluginContext, companyId: string): Promise<unkn
         }).join("\n")
       : "No active agents";
 
-    const issueList = issues.length > 0
-      ? issues.map((i: { identifier: string | null; id: string; title?: string }) => `- **${i.identifier ?? i.id}** ${i.title ?? ""}`).join("\n")
+    const activeList = activeIssues.length > 0
+      ? activeIssues.map((i: { identifier: string | null; id: string; title?: string; assigneeAgentId?: string | null; executionAgentNameKey?: string | null }) => {
+          const tag = i.identifier ?? i.id;
+          const agent = i.executionAgentNameKey ? ` _(${i.executionAgentNameKey})_` : "";
+          return `- **${tag}** ${i.title ?? ""}${agent}`;
+        }).join("\n")
+      : "No active work";
+
+    const doneList = doneIssues.length > 0
+      ? doneIssues.map((i: { identifier: string | null; id: string; title?: string }) => `- **${i.identifier ?? i.id}** ${i.title ?? ""}`).join("\n")
       : "No recent completions";
 
     const embeds: DiscordEmbed[] = [
@@ -518,7 +529,8 @@ async function handleStatus(ctx: PluginContext, companyId: string): Promise<unkn
         color: COLORS.BLUE,
         fields: [
           { name: `Active Agents (${agents.length})`, value: agentList },
-          { name: `Recent Completions (${issues.length})`, value: issueList },
+          { name: `In Progress (${activeIssues.length})`, value: activeList },
+          { name: `Recent Completions (${doneIssues.length})`, value: doneList },
         ],
         footer: { text: "Paperclip" },
         timestamp: new Date().toISOString(),
