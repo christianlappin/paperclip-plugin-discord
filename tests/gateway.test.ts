@@ -46,6 +46,110 @@ describe("connectGateway", () => {
     result.close(); // should not throw
   });
 
+  it("does not throw 'Sent before connected' when heartbeat timer fires after the socket closes (2026-05-12 crash regression)", async () => {
+    // Reproduce the InvalidStateError that crashed the worker for two weeks:
+    // a heartbeat scheduled via setInterval fired between onclose firing and
+    // the cleanup timer being cleared, calling ws.send on a CLOSED socket.
+    vi.useFakeTimers();
+
+    class FlakyFakeWebSocket {
+      static OPEN = 1;
+      static CLOSING = 2;
+      static CLOSED = 3;
+      static instances: FlakyFakeWebSocket[] = [];
+
+      onopen: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onclose: ((event: { code: number; reason: string }) => void) | null = null;
+      onerror: (() => void) | null = null;
+      sent: string[] = [];
+      readyState = 1; // OPEN
+
+      constructor(_url: string) {
+        FlakyFakeWebSocket.instances.push(this);
+      }
+
+      send(payload: string) {
+        if (this.readyState !== 1) {
+          // Mirror the real WHATWG WebSocket behaviour.
+          throw new DOMException("Sent before connected.", "InvalidStateError");
+        }
+        this.sent.push(payload);
+      }
+
+      close() {
+        this.readyState = 3;
+      }
+    }
+
+    // Expose OPEN/CLOSED on the static `WebSocket` reference the source reads.
+    globalThis.WebSocket = FlakyFakeWebSocket as unknown as typeof WebSocket;
+
+    // Re-import to pick up the patched WebSocket binding.
+    vi.resetModules();
+    const { connectGateway } = await import("../src/gateway.js");
+    const ctx = makeCtx();
+    // Heartbeat ack timeout writes a reconnection metric — stub it.
+    (ctx as unknown as { metrics: { write: () => Promise<void> } }).metrics = {
+      write: vi.fn().mockResolvedValue(undefined),
+    };
+    (ctx.http.fetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      json: async () => ({ url: "wss://gateway.discord.test" }),
+    });
+
+    const result = await connectGateway(ctx, "fake-token", vi.fn(), undefined, {
+      listenForMessages: false,
+      includeMessageContent: false,
+    });
+
+    const socket = FlakyFakeWebSocket.instances[0];
+    expect(socket).toBeDefined();
+
+    // HELLO with a short interval so jitter resolves quickly under fake timers.
+    socket.onmessage?.({
+      data: JSON.stringify({
+        op: 10,
+        d: { heartbeat_interval: 1000 },
+        s: null,
+        t: null,
+      }),
+    });
+
+    // Drain jitter delay + first interval. The first heartbeat should send while OPEN.
+    vi.advanceTimersByTime(1000);
+    vi.advanceTimersByTime(1000);
+    const heartbeatFrames = socket.sent.filter((p) => {
+      try {
+        return JSON.parse(p).op === 1;
+      } catch {
+        return false;
+      }
+    });
+    expect(heartbeatFrames.length).toBeGreaterThan(0);
+
+    // Simulate the socket closing without the heartbeat interval being cleared
+    // first (race the real bug exercised).
+    socket.readyState = 3; // CLOSED
+
+    // Firing another tick must NOT throw, must NOT call .send, and must NOT
+    // crash the worker. Before the fix, this advanceTimersByTime raised
+    // InvalidStateError out of the setInterval callback.
+    expect(() => vi.advanceTimersByTime(5000)).not.toThrow();
+
+    const heartbeatFramesAfterClose = socket.sent.filter((p) => {
+      try {
+        return JSON.parse(p).op === 1;
+      } catch {
+        return false;
+      }
+    });
+    expect(heartbeatFramesAfterClose.length).toBe(heartbeatFrames.length);
+
+    result.close();
+    vi.useRealTimers();
+  });
+
   it("uses guild-only intents when message subscriptions are disabled", async () => {
     class FakeWebSocket {
       static instances: FakeWebSocket[] = [];
