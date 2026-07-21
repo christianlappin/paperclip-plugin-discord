@@ -40,3 +40,14 @@ export async function resolveCompanyId(ctx: PluginContext): Promise<string> {
 export function _resetCompanyIdCache(): void {
   _cachedCompanyId = null;
 }
+
+/**
+ * Company id usable for secret resolution (Paperclip >= 2026.720.0): must be
+ * a real company UUID. Returns null instead of the legacy "default" fallback
+ * so callers surface a clear health message rather than a confusing
+ * binding_missing error from the host.
+ */
+export async function resolveCompanyIdForSecrets(ctx: PluginContext): Promise<string | null> {
+  const id = await resolveCompanyId(ctx);
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) ? id : null;
+}

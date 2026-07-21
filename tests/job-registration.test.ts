@@ -43,7 +43,7 @@ function buildPluginContext(configOverrides: Record<string, unknown> = {}) {
   const registeredJobs = new Map<string, Function>();
 
   const defaultConfig: Record<string, unknown> = {
-    discordBotTokenRef: "fake-secret-ref",
+    discordBotTokenRef: { type: "secret_ref", secretId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
     defaultGuildId: "",
     defaultChannelId: "ch-1",
     approvalsChannelId: "",
@@ -102,7 +102,7 @@ function buildPluginContext(configOverrides: Record<string, unknown> = {}) {
     data: { register: vi.fn() },
     actions: { register: vi.fn() },
     events: { subscribe: vi.fn(), emit: vi.fn(), on: vi.fn() },
-    companies: { list: vi.fn().mockResolvedValue([]) },
+    companies: { list: vi.fn().mockResolvedValue([{ id: "3741f9e1-0e05-4ac3-ac19-19117dd6824b", name: "Test Co" }]) },
     agents: { list: vi.fn().mockResolvedValue([]), invoke: vi.fn() },
     issues: { list: vi.fn().mockResolvedValue([]) },
     http: {

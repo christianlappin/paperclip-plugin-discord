@@ -34,7 +34,7 @@ function buildPluginContext(configOverrides: Record<string, unknown> = {}, state
   let discordMessageCount = 0;
 
   const defaultConfig: Record<string, unknown> = {
-    discordBotTokenRef: "fake-secret-ref",
+    discordBotTokenRef: { type: "secret_ref", secretId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
     defaultGuildId: "",
     defaultChannelId: "ch-default",
     approvalsChannelId: "",
@@ -110,7 +110,7 @@ function buildPluginContext(configOverrides: Record<string, unknown> = {}, state
         return () => {};
       }),
     },
-    companies: { list: vi.fn().mockResolvedValue([]) },
+    companies: { list: vi.fn().mockResolvedValue([{ id: "3741f9e1-0e05-4ac3-ac19-19117dd6824b", name: "Test Co" }]) },
     agents: { list: vi.fn().mockResolvedValue([]), invoke: vi.fn() },
     issues: {
       list: vi.fn().mockResolvedValue([]),

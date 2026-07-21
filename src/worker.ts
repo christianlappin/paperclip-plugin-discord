@@ -44,14 +44,19 @@ import { DiscordAdapter } from "./adapter.js";
 import { processMediaMessage, type MediaAttachment } from "./media-pipeline.js";
 import { registerCommand, parseCommandMessage, executeCommand, listCommands } from "./custom-commands.js";
 import { registerWatch, checkWatches } from "./proactive-suggestions.js";
-import { resolveStartupDiscordBotToken, type DiscordRuntimeHealth } from "./runtime-token.js";
+import {
+  resolveCompanyScopedSecret,
+  resolveStartupDiscordBotToken,
+  type DiscordRuntimeHealth,
+} from "./runtime-token.js";
+import { hasSecretRef, type SecretRefConfig } from "./secret-ref.js";
 
 // Module-level state captured during setup() so onWebhook() can reuse it.
 let _pluginCtx: PluginContext | null = null;
 let _cmdCtx: CommandContext | null = null;
 let runtimeHealth: DiscordRuntimeHealth = { status: "ok" };
 
-import { resolveCompanyId } from "./company-resolver.js";
+import { resolveCompanyId, resolveCompanyIdForSecrets } from "./company-resolver.js";
 import {
   type EscalationRecord,
   getEscalation,
@@ -62,8 +67,8 @@ import {
 } from "./escalation-state.js";
 
 type DiscordConfig = {
-  discordBotTokenRef: string;
-  paperclipBoardApiKeyRef?: string;
+  discordBotTokenRef: SecretRefConfig;
+  paperclipBoardApiKeyRef?: SecretRefConfig;
   defaultGuildId: string;
   defaultChannelId: string;
   approvalsChannelId: string;
@@ -374,10 +379,11 @@ const plugin = definePlugin({
     // Hard validation: required config must be present. Failing fast with a
     // clear, plugin-scoped error is far easier to diagnose than silently
     // disabling the plugin or falling through to an empty channel id. (issue #53)
-    if (!config.discordBotTokenRef || !String(config.discordBotTokenRef).trim()) {
+    if (!hasSecretRef(config.discordBotTokenRef)) {
       throw new Error(
-        `[${PLUGIN_ID}] discordBotTokenRef is required but is missing or empty. ` +
-          `Configure a Discord bot token reference before enabling the plugin.`,
+        `[${PLUGIN_ID}] discordBotTokenRef is required but is missing or invalid. ` +
+          `Configure the Discord bot token as { type: "secret_ref", secretId: "<uuid>" } ` +
+          `before enabling the plugin.`,
       );
     }
     if (!config.defaultChannelId || !String(config.defaultChannelId).trim()) {
@@ -387,7 +393,12 @@ const plugin = definePlugin({
       );
     }
 
-    const token = await resolveStartupDiscordBotToken(ctx, config.discordBotTokenRef, (health) => {
+    // Company scope is required for secret resolution on Paperclip >= 2026.720.0.
+    // On single-company instances this is the lone company; multi-company
+    // instances use the /clip connect default. See src/secret-ref.ts.
+    const secretsCompanyId = await resolveCompanyIdForSecrets(ctx);
+
+    const token = await resolveStartupDiscordBotToken(ctx, config.discordBotTokenRef, secretsCompanyId, (health) => {
       runtimeHealth = health;
     });
     if (!token) {
@@ -395,13 +406,13 @@ const plugin = definePlugin({
       return;
     }
     let paperclipBoardApiKey = "";
-    if (config.paperclipBoardApiKeyRef) {
-      try {
-        paperclipBoardApiKey = await ctx.secrets.resolve(config.paperclipBoardApiKeyRef);
-      } catch (err) {
-        ctx.logger.warn("Discord plugin could not resolve Paperclip board API key; board features are disabled", {
-          error: String(err),
-        });
+    if (config.paperclipBoardApiKeyRef && hasSecretRef(config.paperclipBoardApiKeyRef)) {
+      paperclipBoardApiKey = (await resolveCompanyScopedSecret(ctx, config.paperclipBoardApiKeyRef, {
+        companyId: secretsCompanyId,
+        configPath: "paperclipBoardApiKeyRef",
+      })) ?? "";
+      if (!paperclipBoardApiKey) {
+        ctx.logger.warn("Discord plugin could not resolve Paperclip board API key; board features are disabled");
       }
     }
     const baseUrl = config.paperclipBaseUrl || "http://localhost:3100";
@@ -1602,12 +1613,15 @@ const plugin = definePlugin({
   },
 
   async onValidateConfig(config) {
-    if (
-      !config.discordBotTokenRef ||
-      typeof config.discordBotTokenRef !== "string" ||
-      !config.discordBotTokenRef.trim()
-    ) {
-      return { ok: false, errors: [`[${PLUGIN_ID}] discordBotTokenRef is required`] };
+    if (!hasSecretRef(config.discordBotTokenRef)) {
+      return {
+        ok: false,
+        errors: [
+          `[${PLUGIN_ID}] discordBotTokenRef is required and must be ` +
+            `{ type: "secret_ref", secretId: "<uuid>" } (legacy bare secret UUIDs are accepted ` +
+            `at runtime but rejected by Paperclip on save)`,
+        ],
+      };
     }
     if (
       !config.defaultChannelId ||

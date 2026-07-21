@@ -1,5 +1,5 @@
 export const PLUGIN_ID = "paperclip-plugin-discord";
-export const PLUGIN_VERSION = "0.7.3";
+export const PLUGIN_VERSION = "1.0.0";
 
 export const WEBHOOK_KEYS = {
   discordInteractions: "discord-interactions",

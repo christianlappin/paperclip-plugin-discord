@@ -48,20 +48,30 @@ const manifest: PaperclipPluginManifestV1 = {
     type: "object",
     properties: {
       discordBotTokenRef: {
-        type: "string",
+        type: "object",
         format: "secret-ref",
         title: "Discord Bot Token (secret reference)",
         description:
-          "Secret UUID for your Discord Bot token. Create the secret in Settings → Secrets, then paste its UUID here.",
-        default: DEFAULT_CONFIG.discordBotTokenRef,
+          "Company-scoped secret reference for your Discord Bot token: { type: \"secret_ref\", secretId: \"<uuid>\", version?: \"latest\" }. Create the secret in Settings → Secrets, then select it here. Requires Paperclip >= 2026.720.0.",
+        properties: {
+          type: { type: "string", const: "secret_ref" },
+          secretId: { type: "string", format: "uuid" },
+          version: {},
+        },
+        required: ["type", "secretId"],
       },
       paperclipBoardApiKeyRef: {
-        type: "string",
+        type: "object",
         format: "secret-ref",
         title: "Paperclip Board API Key (secret reference)",
         description:
-          "Optional. Secret UUID for a Paperclip board API key. Required when Paperclip is deployed in `authenticated` mode so that plugin-originated calls (approve/reject buttons, workflow steps, inbound reply routing) can satisfy server-side board-auth checks. Create a board API key in Settings → API Keys, store it as a secret, then paste the secret UUID here. Leave blank for `local_trusted` deployments.",
-        default: DEFAULT_CONFIG.paperclipBoardApiKeyRef,
+          "Optional. Company-scoped secret reference ({ type: \"secret_ref\", secretId }) for a Paperclip board API key. Required when Paperclip is deployed in `authenticated` mode so plugin-originated calls (approve/reject buttons, workflow steps, inbound reply routing) satisfy server-side board-auth checks. Leave unset for `local_trusted` deployments.",
+        properties: {
+          type: { type: "string", const: "secret_ref" },
+          secretId: { type: "string", format: "uuid" },
+          version: {},
+        },
+        required: ["type", "secretId"],
       },
       defaultGuildId: {
         type: "string",

@@ -67,7 +67,7 @@ function buildPluginContext(config: Record<string, unknown>) {
     data: { register: vi.fn() },
     actions: { register: vi.fn() },
     events: { subscribe: vi.fn(), emit: vi.fn(), on: vi.fn() },
-    companies: { list: vi.fn().mockResolvedValue([]) },
+    companies: { list: vi.fn().mockResolvedValue([{ id: "3741f9e1-0e05-4ac3-ac19-19117dd6824b", name: "Test Co" }]) },
     agents: { list: vi.fn().mockResolvedValue([]), invoke: vi.fn() },
     issues: { list: vi.fn().mockResolvedValue([]) },
     http: {
@@ -81,7 +81,7 @@ function buildPluginContext(config: Record<string, unknown>) {
 /** A config with all required fields present and features off. */
 function validConfig(overrides: Record<string, unknown> = {}) {
   return {
-    discordBotTokenRef: "fake-secret-ref",
+    discordBotTokenRef: { type: "secret_ref", secretId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
     defaultChannelId: "ch-1",
     defaultGuildId: "",
     enableIntelligence: false,
