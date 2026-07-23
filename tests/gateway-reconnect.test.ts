@@ -6,6 +6,7 @@ import {
   MAX_BACKOFF_MS,
   STABLE_CONNECTION_MS,
   RATE_LIMIT_COOLDOWN_MS,
+  CONNECT_TIMEOUT_MS,
   IDENTIFY_BUDGET_MAX,
   IDENTIFY_BUDGET_WINDOW_MS,
 } from "../src/gateway.js";
@@ -204,15 +205,16 @@ describe("reconnect-storm regression (loop multiplication)", () => {
     expect(FakeWebSocket.instances).toHaveLength(2);
     const second = FakeWebSocket.instances[1];
 
-    // The stale socket firing events (as during the storm) must be inert.
-    first.serverClose(1000);
-    await vi.advanceTimersByTimeAsync(MAX_BACKOFF_MS * 2);
-    expect(FakeWebSocket.instances).toHaveLength(2);
-
     // New socket resumes rather than re-identifying.
     await handshake(second);
     expect(second.resumes()).toBe(1);
     expect(second.identifies()).toBe(0);
+    await second.resumed();
+
+    // The stale socket firing events (as during the storm) must be inert.
+    first.serverClose(1000);
+    await vi.advanceTimersByTimeAsync(MAX_BACKOFF_MS * 2);
+    expect(FakeWebSocket.instances).toHaveLength(2);
   });
 
   it("keeps exactly one pending reconnect even when close events pile up", async () => {
@@ -226,7 +228,42 @@ describe("reconnect-storm regression (loop multiplication)", () => {
     first.serverClose(1000);
     first.serverClose(1006);
 
-    await vi.advanceTimersByTimeAsync(MAX_BACKOFF_MS * 2);
+    // If each close had scheduled its own timer they would all fire at the
+    // same base delay — advancing exactly that far must create ONE socket.
+    await vi.advanceTimersByTimeAsync(BASE_RECONNECT_MS);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+  });
+
+  it("tears down a socket that never becomes ready (connect watchdog)", async () => {
+    const { ctx } = await openGateway();
+    const first = FakeWebSocket.instances[0];
+    // Socket hangs in CONNECTING: no open, no error, no close.
+    await vi.advanceTimersByTimeAsync(CONNECT_TIMEOUT_MS);
+    expect(first.closeCalls.at(-1)).toEqual({ code: 4000, reason: "Connect timeout" });
+    expect(ctx.logger.warn).toHaveBeenCalledWith(
+      "Gateway connection not ready within timeout, retrying",
+      expect.objectContaining({ generation: 1 }),
+    );
+    await vi.advanceTimersByTimeAsync(BASE_RECONNECT_MS);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+  });
+
+  it("recovers when a handshake errors without ever emitting a close event", async () => {
+    // Regression: 2026-07-23 — generation 8 got a WebSocket error 11s into
+    // CONNECTING, no close event followed, and the gateway hung for 8+ hours.
+    await openGateway();
+    const first = FakeWebSocket.instances[0];
+    first.onerror?.({});
+    expect(first.closeCalls.at(-1)).toEqual({ code: 4000, reason: "Socket error before established" });
+    expect(first.onclose).toBeNull(); // detached: a late close event stays inert
+
+    await vi.advanceTimersByTimeAsync(BASE_RECONNECT_MS);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    // And only one reconnect loop exists afterwards.
+    const second = FakeWebSocket.instances[1];
+    await handshake(second);
+    await second.ready();
+    await vi.advanceTimersByTimeAsync(STABLE_CONNECTION_MS);
     expect(FakeWebSocket.instances).toHaveLength(2);
   });
 

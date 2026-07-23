@@ -16,6 +16,11 @@ export const MAX_BACKOFF_MS = 15 * 60_000;
 // reconnect used the base delay.
 export const STABLE_CONNECTION_MS = 60_000;
 export const RATE_LIMIT_COOLDOWN_MS = 30 * 60_000;
+// A new socket must reach READY/RESUMED within this window or it is torn down
+// and retried. Handshake failures do not reliably emit a close event (observed
+// 2026-07-23: an error during CONNECTING with no close left the gateway hung
+// for 8+ hours), so recovery cannot depend on onclose alone.
+export const CONNECT_TIMEOUT_MS = 60_000;
 // Discord resets the bot token after 1000 identifies in 24h. Budget well below
 // that so a bug can never burn the token again.
 export const IDENTIFY_BUDGET_MAX = 500;
@@ -177,6 +182,7 @@ export async function respondViaCallback(
 interface GatewaySocket {
   gen: number;
   ws: WebSocket;
+  connectTimer: ReturnType<typeof setTimeout> | null;
   heartbeatStartTimer: ReturnType<typeof setTimeout> | null;
   heartbeatInterval: ReturnType<typeof setInterval> | null;
   awaitingAck: boolean;
@@ -241,6 +247,13 @@ export async function connectGateway(
     }
   }
 
+  function clearConnectTimer(sock: GatewaySocket): void {
+    if (sock.connectTimer) {
+      clearTimeout(sock.connectTimer);
+      sock.connectTimer = null;
+    }
+  }
+
   /**
    * Tear a socket down so it can never act again: kill its timers, detach its
    * handlers (a stale socket must not log, reconnect, or touch session state),
@@ -249,6 +262,7 @@ export async function connectGateway(
    */
   function destroySocket(sock: GatewaySocket, code: number, reason: string): void {
     clearHeartbeat(sock);
+    clearConnectTimer(sock);
     sock.ws.onopen = null;
     sock.ws.onmessage = null;
     sock.ws.onerror = null;
@@ -380,12 +394,30 @@ export async function connectGateway(
     const sock: GatewaySocket = {
       gen,
       ws,
+      connectTimer: null,
       heartbeatStartTimer: null,
       heartbeatInterval: null,
       awaitingAck: false,
       readyAt: null,
     };
     currentSocket = sock;
+
+    // Watchdog: if this socket has not reached READY/RESUMED in time, tear it
+    // down and retry. Covers CONNECTING hangs, handshakes that error without a
+    // close event, and a HELLO/READY that never arrives.
+    sock.connectTimer = setTimeout(() => {
+      sock.connectTimer = null;
+      if (!isCurrent(sock)) return;
+      ctx.logger.warn("Gateway connection not ready within timeout, retrying", {
+        generation: gen,
+        readyState: ws.readyState,
+        timeoutMs: CONNECT_TIMEOUT_MS,
+      });
+      currentSocket = null;
+      destroySocket(sock, 4000, "Connect timeout");
+      consecutiveFailures++;
+      scheduleReconnect("connect-timeout", policy.nextDelay(false), true);
+    }, CONNECT_TIMEOUT_MS);
 
     ws.onopen = () => {
       if (!isCurrent(sock)) return;
@@ -450,11 +482,13 @@ export async function connectGateway(
             sessionId = ready.session_id;
             resumeUrl = ready.resume_gateway_url;
             sock.readyAt = Date.now();
+            clearConnectTimer(sock);
             ctx.logger.info("Gateway ready", { sessionId, generation: gen });
           }
 
           if (payload.t === "RESUMED") {
             sock.readyAt = Date.now();
+            clearConnectTimer(sock);
             ctx.logger.info("Gateway resumed successfully", { generation: gen });
           }
 
@@ -523,6 +557,7 @@ export async function connectGateway(
     ws.onclose = (event) => {
       // The socket's own timers always die with it, current or not.
       clearHeartbeat(sock);
+      clearConnectTimer(sock);
       if (!isCurrent(sock)) return; // stale socket: never log, never reconnect
       currentSocket = null;
       ctx.logger.info("Gateway WebSocket closed", {
@@ -574,7 +609,18 @@ export async function connectGateway(
       ctx.logger.warn("Gateway WebSocket error", {
         error: String(event),
         generation: gen,
+        readyState: ws.readyState,
       });
+      // An error on a socket that is not established is terminal: handshake
+      // failures do not reliably emit a close event, and waiting for one left
+      // the gateway hung in CONNECTING for 8+ hours on 2026-07-23. Established
+      // sockets keep letting onclose drive recovery (it carries the close code).
+      if (ws.readyState !== WebSocket.OPEN) {
+        currentSocket = null;
+        destroySocket(sock, 4000, "Socket error before established");
+        consecutiveFailures++;
+        scheduleReconnect("connect-error", policy.nextDelay(false), true);
+      }
     };
   }
 
