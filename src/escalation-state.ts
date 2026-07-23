@@ -23,28 +23,35 @@ export interface EscalationRecord {
 }
 
 // ---------------------------------------------------------------------------
-// State helpers — company-aware with backward-compat fallback
+// State helpers — strictly company-scoped (Paperclip >= 2026.720.0)
+//
+// The 720 host rejects company-scoped state access for any company other than
+// the one the current invocation is scoped to, so scope "default" is never
+// accessible from a company-scoped invocation. Callers must pass the real
+// company UUID (see resolveCompanyId in company-resolver.ts).
 // ---------------------------------------------------------------------------
 
 export async function getEscalation(
   ctx: PluginContext,
   escalationId: string,
-  escalationCompanyId?: string,
+  escalationCompanyId: string,
 ): Promise<EscalationRecord | null> {
-  const key = `escalation_${escalationId}`;
-  if (escalationCompanyId) {
-    const raw = await ctx.state.get({ scopeKind: "company", scopeId: escalationCompanyId, stateKey: key });
-    if (raw) return raw as EscalationRecord;
-  }
-  // Backward-compat fallback
-  const fallback = await ctx.state.get({ scopeKind: "company", scopeId: "default", stateKey: key });
-  return (fallback as EscalationRecord) ?? null;
+  const raw = await ctx.state.get({
+    scopeKind: "company",
+    scopeId: escalationCompanyId,
+    stateKey: `escalation_${escalationId}`,
+  });
+  return (raw as EscalationRecord) ?? null;
 }
 
 export async function saveEscalation(ctx: PluginContext, record: EscalationRecord): Promise<void> {
-  const scopeId = record.companyId || "default";
+  if (!record.companyId) {
+    throw new Error(
+      `Cannot save escalation ${record.escalationId}: record.companyId is required for company-scoped state`,
+    );
+  }
   await ctx.state.set(
-    { scopeKind: "company", scopeId, stateKey: `escalation_${record.escalationId}` },
+    { scopeKind: "company", scopeId: record.companyId, stateKey: `escalation_${record.escalationId}` },
     record,
   );
 }
@@ -52,14 +59,10 @@ export async function saveEscalation(ctx: PluginContext, record: EscalationRecor
 export async function trackPendingEscalation(
   ctx: PluginContext,
   escalationId: string,
-  escalationCompanyId: string = "default",
+  escalationCompanyId: string,
 ): Promise<void> {
   const key = "escalation_pending_ids";
-  let raw = await ctx.state.get({ scopeKind: "company", scopeId: escalationCompanyId, stateKey: key });
-  // Backward-compat fallback for reads
-  if (!raw && escalationCompanyId !== "default") {
-    raw = await ctx.state.get({ scopeKind: "company", scopeId: "default", stateKey: key });
-  }
+  const raw = await ctx.state.get({ scopeKind: "company", scopeId: escalationCompanyId, stateKey: key });
   const ids = (raw as string[]) ?? [];
   if (!ids.includes(escalationId)) {
     ids.push(escalationId);
@@ -73,14 +76,10 @@ export async function trackPendingEscalation(
 export async function untrackPendingEscalation(
   ctx: PluginContext,
   escalationId: string,
-  escalationCompanyId: string = "default",
+  escalationCompanyId: string,
 ): Promise<void> {
   const key = "escalation_pending_ids";
-  let raw = await ctx.state.get({ scopeKind: "company", scopeId: escalationCompanyId, stateKey: key });
-  // Backward-compat fallback for reads
-  if (!raw && escalationCompanyId !== "default") {
-    raw = await ctx.state.get({ scopeKind: "company", scopeId: "default", stateKey: key });
-  }
+  const raw = await ctx.state.get({ scopeKind: "company", scopeId: escalationCompanyId, stateKey: key });
   const ids = (raw as string[]) ?? [];
   const filtered = ids.filter((id) => id !== escalationId);
   await ctx.state.set(
@@ -89,29 +88,15 @@ export async function untrackPendingEscalation(
   );
 }
 
-/**
- * Collect pending escalation IDs across both company-scoped and legacy scopes,
- * deduplicating by escalation ID.
- */
+/** Pending escalation IDs for the invocation's company scope. */
 export async function collectPendingEscalationIds(
   ctx: PluginContext,
-  companyId: string | undefined,
+  companyId: string,
 ): Promise<string[]> {
-  const scopeIds = companyId && companyId !== "default" ? [companyId, "default"] : ["default"];
-  const seenIds = new Set<string>();
-  const pendingIds: string[] = [];
-  for (const sid of scopeIds) {
-    const raw = await ctx.state.get({
-      scopeKind: "company",
-      scopeId: sid,
-      stateKey: "escalation_pending_ids",
-    });
-    for (const id of ((raw as string[]) ?? [])) {
-      if (!seenIds.has(id)) {
-        seenIds.add(id);
-        pendingIds.push(id);
-      }
-    }
-  }
-  return pendingIds;
+  const raw = await ctx.state.get({
+    scopeKind: "company",
+    scopeId: companyId,
+    stateKey: "escalation_pending_ids",
+  });
+  return (raw as string[]) ?? [];
 }

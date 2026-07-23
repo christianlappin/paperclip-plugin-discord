@@ -1406,7 +1406,9 @@ async function handleEscalationButton(
     return respondToInteraction({ type: 4, content: `Escalation already ${record.status}.`, ephemeral: true });
   }
 
-  const companyId = record.companyId || "default";
+  // Write back to the scope the record was actually found under — scope
+  // "default" is rejected by the 720 host.
+  const companyId = record.companyId || companyIdForLookup;
 
   const resolveRecord = async (resolution: string): Promise<void> => {
     record!.status = "resolved";

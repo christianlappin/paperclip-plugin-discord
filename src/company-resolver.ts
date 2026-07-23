@@ -41,6 +41,17 @@ export function _resetCompanyIdCache(): void {
   _cachedCompanyId = null;
 }
 
+const COMPANY_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * True when the id is a real company UUID rather than the legacy "default"
+ * sentinel. On Paperclip >= 2026.720.0 company-scoped host calls (state,
+ * secrets) reject anything that is not the invocation's actual company.
+ */
+export function isRealCompanyId(id: string | null | undefined): id is string {
+  return !!id && COMPANY_UUID_RE.test(id);
+}
+
 /**
  * Company id usable for secret resolution (Paperclip >= 2026.720.0): must be
  * a real company UUID. Returns null instead of the legacy "default" fallback
@@ -49,5 +60,5 @@ export function _resetCompanyIdCache(): void {
  */
 export async function resolveCompanyIdForSecrets(ctx: PluginContext): Promise<string | null> {
   const id = await resolveCompanyId(ctx);
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) ? id : null;
+  return isRealCompanyId(id) ? id : null;
 }

@@ -56,7 +56,7 @@ let _pluginCtx: PluginContext | null = null;
 let _cmdCtx: CommandContext | null = null;
 let runtimeHealth: DiscordRuntimeHealth = { status: "ok" };
 
-import { resolveCompanyId, resolveCompanyIdForSecrets } from "./company-resolver.js";
+import { resolveCompanyId, resolveCompanyIdForSecrets, isRealCompanyId } from "./company-resolver.js";
 import {
   type EscalationRecord,
   getEscalation,
@@ -481,21 +481,21 @@ const plugin = definePlugin({
       if (!text?.trim()) return;
 
       if (mapping.entityType === "escalation") {
-        // Route to escalation response
-        const escalationCompanyId = mapping.companyId || "default";
-        let record = await ctx.state.get({
+        // Route to escalation response. Company-scoped state on Paperclip
+        // >= 2026.720.0 only accepts the invocation's real company — scope
+        // "default" is rejected by the host, so there is no legacy fallback.
+        const escalationCompanyId = mapping.companyId || (await resolveCompanyId(ctx));
+        if (!isRealCompanyId(escalationCompanyId)) {
+          ctx.logger.warn("Cannot route reply to escalation — no company id resolved", {
+            escalationId: mapping.entityId,
+          });
+          return;
+        }
+        const record = await ctx.state.get({
           scopeKind: "company",
           scopeId: escalationCompanyId,
           stateKey: `escalation_${mapping.entityId}`,
         }) as EscalationRecord | null;
-        // Backward-compat fallback: check "default" scope if company-scoped read returns null
-        if (!record && escalationCompanyId !== "default") {
-          record = await ctx.state.get({
-            scopeKind: "company",
-            scopeId: "default",
-            stateKey: `escalation_${mapping.entityId}`,
-          }) as EscalationRecord | null;
-        }
 
         if (record && record.status === "pending") {
           record.status = "resolved";
@@ -790,10 +790,10 @@ const plugin = definePlugin({
 
     // Escalation state helpers are imported from ./escalation-state.js
     // Local wrappers that close over ctx for call-site convenience:
-    const _getEscalation = (id: string, cid?: string) => getEscalation(ctx, id, cid);
+    const _getEscalation = (id: string, cid: string) => getEscalation(ctx, id, cid);
     const _saveEscalation = (r: EscalationRecord) => saveEscalation(ctx, r);
-    const _trackPending = (id: string, cid?: string) => trackPendingEscalation(ctx, id, cid);
-    const _untrackPending = (id: string, cid?: string) => untrackPendingEscalation(ctx, id, cid);
+    const _trackPending = (id: string, cid: string) => trackPendingEscalation(ctx, id, cid);
+    const _untrackPending = (id: string, cid: string) => untrackPendingEscalation(ctx, id, cid);
 
     function buildEscalationEmbed(payload: EscalationCreatedPayload): {
       embeds: DiscordEmbed[];
@@ -1079,6 +1079,10 @@ const plugin = definePlugin({
 
     ctx.jobs.register("check-escalation-timeouts", async () => {
       const jobCompanyId = await resolveCompanyId(ctx);
+      if (!isRealCompanyId(jobCompanyId)) {
+        ctx.logger.debug("Skipping escalation timeout check — no company id resolved", { jobCompanyId });
+        return;
+      }
       const pendingIds = await collectPendingEscalationIds(ctx, jobCompanyId);
       if (pendingIds.length === 0) return;
 

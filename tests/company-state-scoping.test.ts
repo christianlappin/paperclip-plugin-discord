@@ -93,6 +93,40 @@ function makeEscalation(overrides: Partial<EscalationRecord> = {}): EscalationRe
   };
 }
 
+/**
+ * Simulates Paperclip >= 2026.720.0 host enforcement: any company-scoped
+ * state access for a company other than the invocation's throws.
+ */
+function makeStrictCtx(invocationCompanyId: string) {
+  const base = makeScopedCtx();
+  const guard = (op: string, ref: { scopeKind?: string; scopeId: string }) => {
+    if ((ref.scopeKind ?? "company") === "company" && ref.scopeId !== invocationCompanyId) {
+      throw new Error(
+        `Plugin "test" is not allowed to perform "${op}": requested company "${ref.scopeId}" ` +
+          `but the current invocation is scoped to company "${invocationCompanyId}"`,
+      );
+    }
+  };
+  const innerGet = base.state.get;
+  const innerSet = base.state.set;
+  base.state.get = vi.fn().mockImplementation((ref: any) => {
+    guard("state.get", ref);
+    return innerGet(ref);
+  });
+  base.state.set = vi.fn().mockImplementation((ref: any, value: unknown) => {
+    guard("state.set", ref);
+    return innerSet(ref, value);
+  });
+  return base;
+}
+
+/** Number of state.get/state.set calls that touched the legacy "default" scope. */
+function defaultScopeCalls(ctx: any): number {
+  return [...ctx.state.get.mock.calls, ...ctx.state.set.mock.calls].filter(
+    (c: any[]) => c[0]?.scopeId === "default",
+  ).length;
+}
+
 // ---------------------------------------------------------------------------
 // Tests: company-aware state scoping
 // ---------------------------------------------------------------------------
@@ -223,37 +257,29 @@ describe("company-aware state scoping", () => {
       expect(result).toEqual(record);
     });
 
-    it("falls back to 'default' scope when company-scoped read returns null", async () => {
-      const record = makeEscalation({ companyId: "default" });
-      stateStore.set(scopedKey("default", "escalation_esc-1"), record);
+    it("does not fall back to the legacy 'default' scope", async () => {
+      // Legacy record exists only under "default" — must NOT be returned,
+      // and the "default" scope must never be touched (720 host rejects it).
+      stateStore.set(scopedKey("default", "escalation_esc-1"), makeEscalation({ companyId: "default" }));
 
       const result = await getEscalation(ctx, "esc-1", "comp-1");
-      expect(result).toEqual(record);
-      expect(result!.companyId).toBe("default");
+      expect(result).toBeNull();
+      expect(ctx.state.get).toHaveBeenCalledTimes(1);
+      expect(defaultScopeCalls(ctx)).toBe(0);
     });
 
-    it("returns null when neither scope has data", async () => {
+    it("returns null when the company scope has no record", async () => {
       const result = await getEscalation(ctx, "esc-nonexistent", "comp-1");
       expect(result).toBeNull();
     });
 
-    it("reads from 'default' scope when companyId is omitted", async () => {
-      const record = makeEscalation({ companyId: "default" });
-      stateStore.set(scopedKey("default", "escalation_esc-1"), record);
+    it("succeeds under 720-style company-scope enforcement", async () => {
+      const strictCtx = makeStrictCtx("comp-1");
+      const record = makeEscalation();
+      stateStore.set(scopedKey("comp-1", "escalation_esc-1"), record);
 
-      const result = await getEscalation(ctx, "esc-1");
+      const result = await getEscalation(strictCtx, "esc-1", "comp-1");
       expect(result).toEqual(record);
-    });
-
-    it("prefers company-scoped data over legacy default-scoped data", async () => {
-      const legacyRecord = makeEscalation({ companyId: "default", agentName: "OldBot" });
-      const companyRecord = makeEscalation({ companyId: "comp-1", agentName: "NewBot" });
-
-      stateStore.set(scopedKey("default", "escalation_esc-1"), legacyRecord);
-      stateStore.set(scopedKey("comp-1", "escalation_esc-1"), companyRecord);
-
-      const result = await getEscalation(ctx, "esc-1", "comp-1");
-      expect(result!.agentName).toBe("NewBot");
     });
   });
 
@@ -269,13 +295,11 @@ describe("company-aware state scoping", () => {
       expect(stateStore.get(scopedKey("default", "escalation_esc-1"))).toBeUndefined();
     });
 
-    it("writes under 'default' scope when companyId is empty", async () => {
+    it("throws when companyId is empty instead of writing to 'default'", async () => {
       const record = makeEscalation({ companyId: "" });
 
-      await saveEscalation(ctx, record);
-
-      const stored = stateStore.get(scopedKey("default", "escalation_esc-1"));
-      expect(stored).toEqual(record);
+      await expect(saveEscalation(ctx, record)).rejects.toThrow(/companyId is required/);
+      expect(ctx.state.set).not.toHaveBeenCalled();
     });
   });
 
@@ -303,22 +327,15 @@ describe("company-aware state scoping", () => {
       expect(stored).toEqual(["esc-1", "esc-2"]);
     });
 
-    it("falls back to legacy list on first track for a company", async () => {
-      // Legacy data exists under "default" scope
+    it("never reads the legacy 'default' scope", async () => {
+      // Legacy data exists under "default" scope — must be ignored entirely.
       stateStore.set(scopedKey("default", "escalation_pending_ids"), ["esc-legacy"]);
 
       await trackPendingEscalation(ctx, "esc-new", "comp-1");
 
-      // Should have read legacy list and written to company scope
       const stored = stateStore.get(scopedKey("comp-1", "escalation_pending_ids")) as string[];
-      expect(stored).toEqual(["esc-legacy", "esc-new"]);
-    });
-
-    it("defaults to 'default' scope when companyId is omitted", async () => {
-      await trackPendingEscalation(ctx, "esc-1");
-
-      const stored = stateStore.get(scopedKey("default", "escalation_pending_ids")) as string[];
-      expect(stored).toEqual(["esc-1"]);
+      expect(stored).toEqual(["esc-new"]);
+      expect(defaultScopeCalls(ctx)).toBe(0);
     });
   });
 
@@ -341,58 +358,46 @@ describe("company-aware state scoping", () => {
       expect(stored).toEqual(["esc-1"]);
     });
 
-    it("falls back to legacy list when company scope is empty", async () => {
+    it("ignores the legacy 'default'-scoped list", async () => {
       stateStore.set(scopedKey("default", "escalation_pending_ids"), ["esc-1", "esc-2"]);
 
       await untrackPendingEscalation(ctx, "esc-1", "comp-1");
 
-      // Should have read from default, filtered, and written to company scope
-      const stored = stateStore.get(scopedKey("comp-1", "escalation_pending_ids")) as string[];
-      expect(stored).toEqual(["esc-2"]);
+      // Legacy list untouched; company scope gets an empty list.
+      expect(stateStore.get(scopedKey("default", "escalation_pending_ids"))).toEqual(["esc-1", "esc-2"]);
+      expect(stateStore.get(scopedKey("comp-1", "escalation_pending_ids"))).toEqual([]);
+      expect(defaultScopeCalls(ctx)).toBe(0);
     });
   });
 
   describe("collectPendingEscalationIds", () => {
-    it("collects from company scope only when no legacy data", async () => {
+    it("reads only the given company scope, never 'default'", async () => {
       stateStore.set(scopedKey("comp-1", "escalation_pending_ids"), ["esc-1", "esc-2"]);
+      stateStore.set(scopedKey("default", "escalation_pending_ids"), ["esc-legacy"]);
 
       const ids = await collectPendingEscalationIds(ctx, "comp-1");
       expect(ids).toEqual(["esc-1", "esc-2"]);
-    });
-
-    it("merges company-scoped and legacy pending ids", async () => {
-      stateStore.set(scopedKey("comp-1", "escalation_pending_ids"), ["esc-1"]);
-      stateStore.set(scopedKey("default", "escalation_pending_ids"), ["esc-2"]);
-
-      const ids = await collectPendingEscalationIds(ctx, "comp-1");
-      expect(ids).toEqual(["esc-1", "esc-2"]);
-    });
-
-    it("deduplicates ids that appear in both scopes", async () => {
-      stateStore.set(scopedKey("comp-1", "escalation_pending_ids"), ["esc-1", "esc-2"]);
-      stateStore.set(scopedKey("default", "escalation_pending_ids"), ["esc-2", "esc-3"]);
-
-      const ids = await collectPendingEscalationIds(ctx, "comp-1");
-      expect(ids).toEqual(["esc-1", "esc-2", "esc-3"]);
-    });
-
-    it("returns only legacy ids when companyId is undefined", async () => {
-      stateStore.set(scopedKey("default", "escalation_pending_ids"), ["esc-1"]);
-
-      const ids = await collectPendingEscalationIds(ctx, undefined);
-      expect(ids).toEqual(["esc-1"]);
-    });
-
-    it("returns only legacy ids when companyId is 'default'", async () => {
-      stateStore.set(scopedKey("default", "escalation_pending_ids"), ["esc-1"]);
-
-      const ids = await collectPendingEscalationIds(ctx, "default");
-      expect(ids).toEqual(["esc-1"]);
+      expect(ctx.state.get).toHaveBeenCalledTimes(1);
+      expect(defaultScopeCalls(ctx)).toBe(0);
     });
 
     it("returns empty array when no pending ids exist", async () => {
       const ids = await collectPendingEscalationIds(ctx, "comp-1");
       expect(ids).toEqual([]);
+    });
+
+    it("supports the full pending lifecycle under 720-style enforcement", async () => {
+      const strictCtx = makeStrictCtx("comp-1");
+      const record = makeEscalation({ companyId: "comp-1" });
+
+      await saveEscalation(strictCtx, record);
+      await trackPendingEscalation(strictCtx, record.escalationId, "comp-1");
+
+      expect(await collectPendingEscalationIds(strictCtx, "comp-1")).toEqual(["esc-1"]);
+      expect(await getEscalation(strictCtx, "esc-1", "comp-1")).toEqual(record);
+
+      await untrackPendingEscalation(strictCtx, "esc-1", "comp-1");
+      expect(await collectPendingEscalationIds(strictCtx, "comp-1")).toEqual([]);
     });
   });
 

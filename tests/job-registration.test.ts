@@ -1,5 +1,6 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import manifest from "../src/manifest.js";
+import { _resetCompanyIdCache } from "../src/company-resolver.js";
 
 // ---------------------------------------------------------------------------
 // The bug: job handlers were registered inside config-conditional blocks,
@@ -232,5 +233,115 @@ describe("job handler registration vs manifest", () => {
     expect(ctx.logger.debug).toHaveBeenCalledWith(
       expect.stringContaining("intelligence disabled"),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Regression: Paperclip >= 2026.720.0 rejects company-scoped state access for
+// any company other than the invocation's. The check-escalation-timeouts job
+// used to read scope "default" as a backward-compat fallback, which failed
+// every 5-minute tick with:
+//   'not allowed to perform "state.get": requested company "default" but the
+//    current invocation is scoped to company "<uuid>"'
+// ---------------------------------------------------------------------------
+
+describe("check-escalation-timeouts under 720 company-scope enforcement", () => {
+  const REAL_CID = "3741f9e1-0e05-4ac3-ac19-19117dd6824b";
+
+  beforeEach(() => {
+    _resetCompanyIdCache();
+  });
+
+  /** State mock that enforces the invocation's company scope like the 720 host. */
+  function buildEnforcedState(invocationCompanyId: string) {
+    const store = new Map<string, unknown>();
+    const keyOf = (ref: { scopeKind: string; scopeId?: string; stateKey: string }) =>
+      `${ref.scopeKind}:${ref.scopeId ?? ""}:${ref.stateKey}`;
+    const guard = (op: string, ref: { scopeKind: string; scopeId?: string }) => {
+      if (ref.scopeKind === "company" && ref.scopeId !== invocationCompanyId) {
+        throw new Error(
+          `Plugin "test" is not allowed to perform "${op}": requested company "${ref.scopeId}" ` +
+            `but the current invocation is scoped to company "${invocationCompanyId}"`,
+        );
+      }
+    };
+    return {
+      store,
+      keyOf,
+      state: {
+        get: vi.fn().mockImplementation((ref: any) => {
+          guard("state.get", ref);
+          return Promise.resolve(store.get(keyOf(ref)) ?? null);
+        }),
+        set: vi.fn().mockImplementation((ref: any, value: unknown) => {
+          guard("state.set", ref);
+          store.set(keyOf(ref), value);
+          return Promise.resolve(undefined);
+        }),
+      },
+    };
+  }
+
+  it("completes a tick and times out stale escalations without touching scope 'default'", async () => {
+    const enforced = buildEnforcedState(REAL_CID);
+    const { ctx, registeredJobs } = buildPluginContext();
+    ctx.state = enforced.state;
+
+    // A pending escalation created 2h ago (timeout is 30 min).
+    const staleRecord = {
+      escalationId: "esc-stale",
+      companyId: REAL_CID,
+      agentName: "SupportBot",
+      reason: "needs a human",
+      channelId: "ch-1",
+      messageId: "msg-1",
+      status: "pending",
+      createdAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+    };
+    enforced.store.set(
+      enforced.keyOf({ scopeKind: "company", scopeId: REAL_CID, stateKey: "escalation_pending_ids" }),
+      ["esc-stale"],
+    );
+    enforced.store.set(
+      enforced.keyOf({ scopeKind: "company", scopeId: REAL_CID, stateKey: "escalation_esc-stale" }),
+      staleRecord,
+    );
+
+    await getSetup()(ctx);
+    const handler = registeredJobs.get("check-escalation-timeouts")!;
+
+    // Before the fix this rejected with the host's scope-enforcement error.
+    await expect(handler()).resolves.toBeUndefined();
+
+    const updated = enforced.store.get(
+      enforced.keyOf({ scopeKind: "company", scopeId: REAL_CID, stateKey: "escalation_esc-stale" }),
+    ) as { status: string };
+    expect(updated.status).toBe("timed_out");
+    expect(
+      enforced.store.get(
+        enforced.keyOf({ scopeKind: "company", scopeId: REAL_CID, stateKey: "escalation_pending_ids" }),
+      ),
+    ).toEqual([]);
+  });
+
+  it("skips the tick instead of failing when no real company id can be resolved", async () => {
+    const { ctx, registeredJobs } = buildPluginContext();
+    await getSetup()(ctx);
+    const handler = registeredJobs.get("check-escalation-timeouts")!;
+
+    // Simulate "no company resolvable" at job time (after a normal setup).
+    _resetCompanyIdCache();
+    ctx.companies.list = vi.fn().mockResolvedValue([]);
+    (ctx.state.get as any).mockClear();
+
+    await expect(handler()).resolves.toBeUndefined();
+    expect(ctx.logger.debug).toHaveBeenCalledWith(
+      expect.stringContaining("Skipping escalation timeout check"),
+      expect.anything(),
+    );
+    const companyScopedCalls = (ctx.state.get as any).mock.calls.filter(
+      (c: any[]) => c[0]?.scopeKind === "company",
+    );
+    expect(companyScopedCalls).toEqual([]);
   });
 });
