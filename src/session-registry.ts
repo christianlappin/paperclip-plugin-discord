@@ -1,6 +1,7 @@
 import type { PluginContext, AgentSessionEvent } from "@paperclipai/plugin-sdk";
 import type { DiscordEmbed, DiscordComponent } from "./discord-api.js";
 import { postEmbed, respondToInteraction } from "./discord-api.js";
+import { resolveCompanyId, isRealCompanyId } from "./company-resolver.js";
 import {
   COLORS,
   DISCORD_API_BASE,
@@ -128,7 +129,12 @@ function scheduleFlush(
 }
 
 // ---------------------------------------------------------------------------
-// State helpers
+// State helpers — strictly company-scoped (Paperclip >= 2026.720.0)
+//
+// The 720 host rejects company-scoped state access for any company other than
+// the one the current invocation is scoped to, so scope "default" is never
+// accessible from a company-scoped invocation. Callers must pass the real
+// company UUID (see resolveCompanyId in company-resolver.ts).
 // ---------------------------------------------------------------------------
 
 function sessionsKey(threadId: string): string {
@@ -138,24 +144,21 @@ function sessionsKey(threadId: string): string {
 export async function getThreadSessions(
   ctx: PluginContext,
   threadId: string,
-  companyId?: string,
+  companyId: string,
 ): Promise<AgentSessionEntry[]> {
-  const key = sessionsKey(threadId);
-  if (companyId) {
-    const raw = await ctx.state.get({ scopeKind: "company", scopeId: companyId, stateKey: key });
-    if (raw) return (raw as ThreadSessions).sessions ?? [];
-  }
-  // Backward-compat fallback: read from "default" scope
-  const fallback = await ctx.state.get({ scopeKind: "company", scopeId: "default", stateKey: key });
-  if (!fallback) return [];
-  return (fallback as ThreadSessions).sessions ?? [];
+  const raw = await ctx.state.get({
+    scopeKind: "company",
+    scopeId: companyId,
+    stateKey: sessionsKey(threadId),
+  });
+  return (raw as ThreadSessions | null)?.sessions ?? [];
 }
 
 async function saveThreadSessions(
   ctx: PluginContext,
   threadId: string,
   sessions: AgentSessionEntry[],
-  companyId: string = "default",
+  companyId: string,
 ): Promise<void> {
   await ctx.state.set(
     { scopeKind: "company", scopeId: companyId, stateKey: sessionsKey(threadId) },
@@ -163,53 +166,58 @@ async function saveThreadSessions(
   );
 }
 
-async function getHandoff(ctx: PluginContext, handoffId: string, companyId?: string): Promise<HandoffRecord | null> {
-  const key = `handoff_${handoffId}`;
-  if (companyId) {
-    const raw = await ctx.state.get({ scopeKind: "company", scopeId: companyId, stateKey: key });
-    if (raw) return raw as HandoffRecord;
-  }
-  const fallback = await ctx.state.get({ scopeKind: "company", scopeId: "default", stateKey: key });
-  return (fallback as HandoffRecord) ?? null;
+async function getHandoff(ctx: PluginContext, handoffId: string, companyId: string): Promise<HandoffRecord | null> {
+  const raw = await ctx.state.get({
+    scopeKind: "company",
+    scopeId: companyId,
+    stateKey: `handoff_${handoffId}`,
+  });
+  return (raw as HandoffRecord) ?? null;
 }
 
 async function saveHandoff(ctx: PluginContext, record: HandoffRecord): Promise<void> {
-  const scopeId = record.companyId || "default";
+  if (!record.companyId) {
+    throw new Error(
+      `Cannot save handoff ${record.handoffId}: record.companyId is required for company-scoped state`,
+    );
+  }
   await ctx.state.set(
-    { scopeKind: "company", scopeId, stateKey: `handoff_${record.handoffId}` },
+    { scopeKind: "company", scopeId: record.companyId, stateKey: `handoff_${record.handoffId}` },
     record,
   );
 }
 
-async function getDiscussion(ctx: PluginContext, id: string, companyId?: string): Promise<DiscussionLoop | null> {
-  const key = `discussion_${id}`;
-  if (companyId) {
-    const raw = await ctx.state.get({ scopeKind: "company", scopeId: companyId, stateKey: key });
-    if (raw) return raw as DiscussionLoop;
-  }
-  const fallback = await ctx.state.get({ scopeKind: "company", scopeId: "default", stateKey: key });
-  return (fallback as DiscussionLoop) ?? null;
+async function getDiscussion(ctx: PluginContext, id: string, companyId: string): Promise<DiscussionLoop | null> {
+  const raw = await ctx.state.get({
+    scopeKind: "company",
+    scopeId: companyId,
+    stateKey: `discussion_${id}`,
+  });
+  return (raw as DiscussionLoop) ?? null;
 }
 
 async function saveDiscussion(ctx: PluginContext, record: DiscussionLoop): Promise<void> {
-  const scopeId = record.companyId || "default";
+  if (!record.companyId) {
+    throw new Error(
+      `Cannot save discussion ${record.discussionId}: record.companyId is required for company-scoped state`,
+    );
+  }
   await ctx.state.set(
-    { scopeKind: "company", scopeId, stateKey: `discussion_${record.discussionId}` },
+    { scopeKind: "company", scopeId: record.companyId, stateKey: `discussion_${record.discussionId}` },
     record,
   );
 }
 
-async function findActiveDiscussion(ctx: PluginContext, threadId: string, companyId?: string): Promise<string | null> {
-  const key = `active_discussion_${threadId}`;
-  if (companyId) {
-    const raw = await ctx.state.get({ scopeKind: "company", scopeId: companyId, stateKey: key });
-    if (raw) return raw as string;
-  }
-  const fallback = await ctx.state.get({ scopeKind: "company", scopeId: "default", stateKey: key });
-  return (fallback as string) ?? null;
+async function findActiveDiscussion(ctx: PluginContext, threadId: string, companyId: string): Promise<string | null> {
+  const raw = await ctx.state.get({
+    scopeKind: "company",
+    scopeId: companyId,
+    stateKey: `active_discussion_${threadId}`,
+  });
+  return (raw as string) ?? null;
 }
 
-async function clearActiveDiscussion(ctx: PluginContext, threadId: string, companyId: string = "default"): Promise<void> {
+async function clearActiveDiscussion(ctx: PluginContext, threadId: string, companyId: string): Promise<void> {
   await ctx.state.set(
     { scopeKind: "company", scopeId: companyId, stateKey: `active_discussion_${threadId}` },
     null,
@@ -536,7 +544,19 @@ export async function handleAcpOutput(
   },
 ): Promise<void> {
   const { sessionId, threadId, agentName, output, status } = event;
-  const eventCompanyId = event.companyId || "default";
+
+  // Company-scoped state on Paperclip >= 2026.720.0 only accepts the
+  // invocation's real company — scope "default" is rejected by the host, so
+  // there is no legacy fallback.
+  let eventCompanyId = event.companyId;
+  if (!eventCompanyId) {
+    const resolved = await resolveCompanyId(ctx);
+    if (!isRealCompanyId(resolved)) {
+      ctx.logger.warn("Dropping ACP output — no company id resolved", { sessionId, threadId });
+      return;
+    }
+    eventCompanyId = resolved;
+  }
 
   let sessions = await getThreadSessions(ctx, threadId, eventCompanyId);
   let session = sessions.find((s) => s.sessionId === sessionId);
@@ -584,7 +604,7 @@ export async function handleAcpOutput(
 
   const discussionId = await findActiveDiscussion(ctx, threadId, eventCompanyId);
   if (discussionId) {
-    await advanceDiscussion(ctx, token, threadId, discussionId, agentName);
+    await advanceDiscussion(ctx, token, threadId, discussionId, agentName, eventCompanyId);
   }
 
   scheduleFlush(ctx, token, threadId, multiAgent);
@@ -677,7 +697,7 @@ export async function createAgentThread(
 export async function getThreadStatus(
   ctx: PluginContext,
   threadId: string,
-  companyId?: string,
+  companyId: string,
 ): Promise<{ sessions: AgentSessionEntry[] }> {
   const sessions = await getThreadSessions(ctx, threadId, companyId);
   return { sessions };
@@ -761,14 +781,19 @@ export async function handleHandoffButton(
   const action = parts[1];
   const handoffId = parts.slice(2).join("_");
 
-  // No companyId available yet — fallback read will check "default" scope
-  const record = await getHandoff(ctx, handoffId);
+  // Handoff custom ids do not embed a company — resolve the invocation's
+  // company for the lookup; scope "default" is rejected by the 720 host.
+  const companyIdForLookup = await resolveCompanyId(ctx);
+  const record = await getHandoff(ctx, handoffId, companyIdForLookup);
   if (!record) {
     return respondToInteraction({ type: 4, content: `Handoff \`${handoffId}\` not found.`, ephemeral: true });
   }
   if (record.status !== "pending") {
     return respondToInteraction({ type: 4, content: `Handoff already ${record.status}.`, ephemeral: true });
   }
+
+  // Write back to the scope the record was actually found under.
+  if (!record.companyId) record.companyId = companyIdForLookup;
 
   if (action === "approve") {
     record.status = "approved";
@@ -905,10 +930,14 @@ async function advanceDiscussion(
   threadId: string,
   discussionId: string,
   lastSpeaker: string,
+  companyId: string,
 ): Promise<void> {
-  const discussion = await getDiscussion(ctx, discussionId);
+  const discussion = await getDiscussion(ctx, discussionId, companyId);
   if (!discussion || discussion.status !== "active") return;
-  const discCompanyId = discussion.companyId || "default";
+  // Write back to the scope the record was actually found under — scope
+  // "default" is rejected by the 720 host.
+  if (!discussion.companyId) discussion.companyId = companyId;
+  const discCompanyId = discussion.companyId;
 
   const elapsed = Date.now() - new Date(discussion.lastActivityAt).getTime();
   if (elapsed > DISCUSSION_STALE_MS) {
@@ -1008,10 +1037,16 @@ export async function handleDiscussionButton(
   const action = parts[1];
   const discussionId = parts.slice(2).join("_");
 
-  const discussion = await getDiscussion(ctx, discussionId);
+  // Discussion custom ids do not embed a company — resolve the invocation's
+  // company for the lookup; scope "default" is rejected by the 720 host.
+  const companyIdForLookup = await resolveCompanyId(ctx);
+  const discussion = await getDiscussion(ctx, discussionId, companyIdForLookup);
   if (!discussion) {
     return respondToInteraction({ type: 4, content: `Discussion \`${discussionId}\` not found.`, ephemeral: true });
   }
+
+  // Write back to the scope the record was actually found under.
+  if (!discussion.companyId) discussion.companyId = companyIdForLookup;
 
   if (action === "continue") {
     if (discussion.status !== "paused_checkpoint") {
@@ -1056,7 +1091,7 @@ export async function handleDiscussionButton(
   if (action === "end") {
     discussion.status = "cancelled";
     await saveDiscussion(ctx, discussion);
-    await clearActiveDiscussion(ctx, discussion.threadId, discussion.companyId || "default");
+    await clearActiveDiscussion(ctx, discussion.threadId, discussion.companyId);
 
     return {
       type: 7,

@@ -5,6 +5,7 @@ import {
   type AgentSessionEntry,
   type TransportKind,
 } from "../src/session-registry.js";
+import { _resetCompanyIdCache } from "../src/company-resolver.js";
 import {
   type EscalationRecord,
   getEscalation,
@@ -135,11 +136,12 @@ describe("company-aware state scoping", () => {
   let ctx: ReturnType<typeof makeScopedCtx>;
 
   beforeEach(() => {
+    _resetCompanyIdCache();
     ctx = makeScopedCtx();
   });
 
   describe("getThreadSessions", () => {
-    it("reads from company-scoped key when companyId is provided", async () => {
+    it("reads from the company-scoped key", async () => {
       const threadId = "thread-1";
       const sessions = [makeSession()];
       stateStore.set(scopedKey("comp-1", `sessions_${threadId}`), { sessions });
@@ -149,32 +151,26 @@ describe("company-aware state scoping", () => {
       expect(result[0].agentName).toBe("CodeBot");
     });
 
-    it("falls back to 'default' scope when company-scoped read returns null", async () => {
+    it("does not fall back to the legacy 'default' scope", async () => {
       const threadId = "thread-1";
-      const sessions = [makeSession({ companyId: "default" })];
-      // Only stored under "default" scope (legacy data)
-      stateStore.set(scopedKey("default", `sessions_${threadId}`), { sessions });
+      // Legacy data exists only under "default" — must NOT be returned, and
+      // the "default" scope must never be touched (720 host rejects it).
+      stateStore.set(scopedKey("default", `sessions_${threadId}`), {
+        sessions: [makeSession({ companyId: "default" })],
+      });
 
       const result = await getThreadSessions(ctx, threadId, "comp-1");
-      expect(result).toHaveLength(1);
-      expect(result[0].companyId).toBe("default");
+      expect(result).toEqual([]);
+      expect(ctx.state.get).toHaveBeenCalledTimes(1);
+      expect(defaultScopeCalls(ctx)).toBe(0);
     });
 
-    it("returns empty array when neither scope has data", async () => {
+    it("returns empty array when the company scope has no data", async () => {
       const result = await getThreadSessions(ctx, "thread-nonexistent", "comp-1");
       expect(result).toEqual([]);
     });
 
-    it("reads from 'default' scope when companyId is omitted", async () => {
-      const threadId = "thread-1";
-      const sessions = [makeSession({ companyId: "default" })];
-      stateStore.set(scopedKey("default", `sessions_${threadId}`), { sessions });
-
-      const result = await getThreadSessions(ctx, threadId);
-      expect(result).toHaveLength(1);
-    });
-
-    it("prefers company-scoped data over legacy default-scoped data", async () => {
+    it("reads only the company scope when both scopes have data", async () => {
       const threadId = "thread-1";
       const legacySessions = [makeSession({ companyId: "default", agentName: "LegacyBot" })];
       const companySessions = [makeSession({ companyId: "comp-1", agentName: "NewBot" })];
@@ -185,11 +181,23 @@ describe("company-aware state scoping", () => {
       const result = await getThreadSessions(ctx, threadId, "comp-1");
       expect(result).toHaveLength(1);
       expect(result[0].agentName).toBe("NewBot");
+      expect(defaultScopeCalls(ctx)).toBe(0);
+    });
+
+    it("succeeds under 720-style company-scope enforcement", async () => {
+      const strictCtx = makeStrictCtx("comp-1");
+      stateStore.set(scopedKey("comp-1", "sessions_thread-1"), { sessions: [makeSession()] });
+
+      const result = await getThreadSessions(strictCtx, "thread-1", "comp-1");
+      expect(result).toHaveLength(1);
+      expect(result[0].agentName).toBe("CodeBot");
     });
   });
 
-  describe("handleAcpOutput with companyId", () => {
-    it("writes session state under company scope when companyId is provided", async () => {
+  describe("handleAcpOutput company scoping", () => {
+    const COMPANY_UUID = "11111111-2222-4333-8444-555555555555";
+
+    it("writes session state under company scope when the event carries a companyId", async () => {
       const event = {
         sessionId: "sess-acp-1",
         threadId: "thread-1",
@@ -206,9 +214,13 @@ describe("company-aware state scoping", () => {
       expect(stored.sessions).toHaveLength(1);
       expect(stored.sessions[0].agentName).toBe("AcpBot");
       expect(stored.sessions[0].companyId).toBe("comp-1");
+      expect(defaultScopeCalls(ctx)).toBe(0);
     });
 
-    it("uses 'default' scope when companyId is not provided", async () => {
+    it("resolves the invocation's company when the event has none", async () => {
+      const companyCtx = makeScopedCtx({
+        companies: { list: vi.fn().mockResolvedValue([{ id: COMPANY_UUID }]) },
+      });
       const event = {
         sessionId: "sess-acp-2",
         threadId: "thread-2",
@@ -216,12 +228,34 @@ describe("company-aware state scoping", () => {
         output: "Hello",
       };
 
-      await handleAcpOutput(ctx, "bot-token", event);
+      await handleAcpOutput(companyCtx, "bot-token", event);
 
-      const stored = stateStore.get(scopedKey("default", "sessions_thread-2")) as { sessions: AgentSessionEntry[] };
+      const stored = stateStore.get(scopedKey(COMPANY_UUID, "sessions_thread-2")) as { sessions: AgentSessionEntry[] };
       expect(stored).toBeDefined();
       expect(stored.sessions).toHaveLength(1);
-      expect(stored.sessions[0].companyId).toBe("default");
+      expect(stored.sessions[0].companyId).toBe(COMPANY_UUID);
+      expect(defaultScopeCalls(companyCtx)).toBe(0);
+    });
+
+    it("drops the event instead of touching the 'default' scope when no company resolves", async () => {
+      // ctx has no companies client, so resolution falls back to the legacy
+      // "default" sentinel — which the 720 host rejects, so the output must
+      // be dropped without any company-scoped state access.
+      const event = {
+        sessionId: "sess-acp-3",
+        threadId: "thread-3",
+        agentName: "AcpBot",
+        output: "Hello",
+      };
+
+      await handleAcpOutput(ctx, "bot-token", event);
+
+      expect(ctx.state.set).not.toHaveBeenCalled();
+      expect(defaultScopeCalls(ctx)).toBe(0);
+      expect(ctx.logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining("no company id resolved"),
+        expect.objectContaining({ sessionId: "sess-acp-3" }),
+      );
     });
   });
 

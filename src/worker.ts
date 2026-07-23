@@ -584,9 +584,12 @@ const plugin = definePlugin({
         threadId: string;
         agentName: string;
         output: string;
+        companyId?: string;
         status?: "running" | "completed" | "failed";
       };
-      await handleAcpOutput(ctx, token, payload);
+      // The event envelope always carries the company the output belongs to —
+      // pass it through so session state lands in that company's scope.
+      await handleAcpOutput(ctx, token, { ...payload, companyId: payload.companyId || event.companyId });
     });
 
     // --- Event deduplication ---
