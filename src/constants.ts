@@ -1,5 +1,5 @@
 export const PLUGIN_ID = "paperclip-plugin-discord";
-export const PLUGIN_VERSION = "1.0.0";
+export const PLUGIN_VERSION = "1.1.0";
 
 export const WEBHOOK_KEYS = {
   discordInteractions: "discord-interactions",
@@ -44,6 +44,10 @@ export const DEFAULT_CONFIG = {
   tridailyTimes: "07:00,13:00,19:00",
   companyChannels: {} as Record<string, string>,
   approvalsChannels: {} as Record<string, string>,
+  errorsChannels: {} as Record<string, string>,
+  escalationsChannels: {} as Record<string, string>,
+  pipelineChannels: {} as Record<string, string>,
+  digestChannels: {} as Record<string, string>,
 } as const;
 
 export const DISCORD_API_BASE = "https://discord.com/api/v10";

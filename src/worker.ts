@@ -115,6 +115,30 @@ type DiscordConfig = {
    * different companies have dedicated approvals channels.
    */
   approvalsChannels?: Record<string, string>;
+  /**
+   * Per-company error channel overrides. Checked for `agent.run.failed` and
+   * budget-warning events before `companyChannels`; falls through to
+   * `errorsChannelId` (global) when a company is not mapped.
+   */
+  errorsChannels?: Record<string, string>;
+  /**
+   * Per-company escalation channel overrides. Checked for `escalation-created`
+   * and `escalate_to_human` events before `companyChannels`; falls through to
+   * `escalationChannelId` (global) when a company is not mapped.
+   */
+  escalationsChannels?: Record<string, string>;
+  /**
+   * Per-company pipeline channel overrides. Checked for `agent.run.started` and
+   * `agent.run.finished` events before `companyChannels`; falls through to
+   * `bdPipelineChannelId` (global) when a company is not mapped.
+   */
+  pipelineChannels?: Record<string, string>;
+  /**
+   * Per-company digest channel overrides. Checked for daily/bidaily/tridaily
+   * digest summaries before `companyChannels`; falls through to
+   * `defaultChannelId` (global) when a company is not mapped.
+   */
+  digestChannels?: Record<string, string>;
 };
 
 type IssueNotificationPayload = Record<string, unknown>;
@@ -771,17 +795,17 @@ const plugin = definePlugin({
 
     if (config.notifyOnAgentError) {
       ctx.events.on("agent.run.failed", (event: PluginEvent) =>
-        notify(event, formatSessionFailure, errorsChannelId ?? undefined),
+        notify(event, formatSessionFailure, errorsChannelId ?? undefined, config.errorsChannels),
       );
     }
 
     ctx.events.on("agent.run.started", async (event: PluginEvent) => {
       const payload = await enrichRunPayload(ctx, event);
-      await notify({ ...event, payload }, formatAgentRunStarted, bdPipelineChannelId ?? undefined);
+      await notify({ ...event, payload }, formatAgentRunStarted, bdPipelineChannelId ?? undefined, config.pipelineChannels);
     });
     ctx.events.on("agent.run.finished", async (event: PluginEvent) => {
       const payload = await enrichRunPayload(ctx, event);
-      await notify({ ...event, payload }, formatAgentRunFinished, bdPipelineChannelId ?? undefined);
+      await notify({ ...event, payload }, formatAgentRunFinished, bdPipelineChannelId ?? undefined, config.pipelineChannels);
     });
 
     // ===================================================================
@@ -875,7 +899,7 @@ const plugin = definePlugin({
         const escalationId = payload.escalationId || event.entityId || "";
         payload.escalationId = escalationId;
 
-        const channelId = await resolveChannel(ctx, event.companyId, escalationChannelId);
+        const channelId = await resolveChannel(ctx, event.companyId, escalationChannelId, config.escalationsChannels);
         if (!channelId) return;
 
         const { embeds, components } = buildEscalationEmbed(payload);
@@ -954,7 +978,7 @@ const plugin = definePlugin({
           suggestedReply: p.suggestedReply ? String(p.suggestedReply) : undefined,
         };
 
-        const channelId = await resolveChannel(ctx, escalationCompanyId, escalationChannelId);
+        const channelId = await resolveChannel(ctx, escalationCompanyId, escalationChannelId, config.escalationsChannels);
         if (!channelId) {
           return { error: "No escalation channel configured." };
         }
@@ -1175,6 +1199,7 @@ const plugin = definePlugin({
           ctx,
           jobCompanyId,
           errorsChannelId ?? defaultChannelId,
+          config.errorsChannels,
         );
         if (!channelId) continue;
 
@@ -1329,7 +1354,7 @@ const plugin = definePlugin({
 
       const companies = await ctx.companies.list();
       for (const company of companies) {
-        const channelId = await resolveChannel(ctx, company.id, defaultChannelId);
+        const channelId = await resolveChannel(ctx, company.id, defaultChannelId, config.digestChannels);
         if (!channelId) continue;
 
         try {
