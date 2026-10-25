@@ -436,6 +436,78 @@ describe("event-specific channel maps", () => {
     });
   });
 
+  // ---------------------------- priority: event-specific map beats companyChannels
+  // resolveChannel checks the event-specific map (step 2) BEFORE companyChannels
+  // (step 3). These populate BOTH and set NO state override, so the event-specific
+  // channel can only win if step 2 genuinely precedes step 3 — swapping the two
+  // lookups makes every assertion in this block fail.
+  describe("event-specific map wins over companyChannels (no state override)", () => {
+    it("errorsChannels beats companyChannels for agent.run.failed", async () => {
+      const { ctx, eventHandlers, mockDiscordFetch } = buildPluginContext({
+        notifyOnAgentError: true,
+        errorsChannelId: "ch-errors-global",
+        companyChannels: { [COMPANY]: "ch-company-general" },
+        errorsChannels: { [COMPANY]: "ch-errors-co1" },
+      });
+      await getSetup()(ctx);
+
+      await emitEvent(eventHandlers, "agent.run.failed", makeEvent("agent.run.failed", nextEvtId("err")));
+
+      expect(postedChannel(mockDiscordFetch)).toBe("ch-errors-co1");
+    });
+
+    it("escalationsChannels beats companyChannels for escalation-created", async () => {
+      const { ctx, eventHandlers, mockDiscordFetch } = buildPluginContext({
+        enableEscalations: true,
+        escalationChannelId: "ch-esc-global",
+        companyChannels: { [COMPANY]: "ch-company-general" },
+        escalationsChannels: { [COMPANY]: "ch-esc-co1" },
+      });
+      await getSetup()(ctx);
+
+      await emitEvent(
+        eventHandlers,
+        ESCALATION_EVENT,
+        makeEvent(ESCALATION_EVENT, nextEvtId("esc"), { escalationId: "esc-1", agentName: "Agent One", reason: "needs a human" }),
+      );
+
+      expect(postedChannel(mockDiscordFetch)).toBe("ch-esc-co1");
+    });
+
+    it("pipelineChannels beats companyChannels for agent.run.started", async () => {
+      const { ctx, eventHandlers, mockDiscordFetch } = buildPluginContext({
+        bdPipelineChannelId: "ch-pipe-global",
+        companyChannels: { [COMPANY]: "ch-company-general" },
+        pipelineChannels: { [COMPANY]: "ch-pipe-co1" },
+      });
+      await getSetup()(ctx);
+
+      await emitEvent(eventHandlers, "agent.run.started", makeEvent("agent.run.started", nextEvtId("pipe")));
+
+      expect(postedChannel(mockDiscordFetch)).toBe("ch-pipe-co1");
+    });
+
+    it("digestChannels beats companyChannels for the daily digest", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-01-01T09:00:00.000Z"));
+      try {
+        const { ctx, jobHandlers, mockDiscordFetch } = buildPluginContext({
+          digestMode: "daily",
+          dailyDigestTime: "09:00",
+          companyChannels: { [COMPANY]: "ch-company-general" },
+          digestChannels: { [COMPANY]: "ch-digest-co1" },
+        });
+        await getSetup()(ctx);
+
+        await jobHandlers.get("discord-daily-digest")!();
+
+        expect(postedChannel(mockDiscordFetch)).toBe("ch-digest-co1");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
   // --------------------------------------------- approvalsChannels regression
   describe("approvalsChannels (existing behavior stays green)", () => {
     it("routes approval.created to the per-company approvalsChannels entry", async () => {
